@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BLE HID Bridge with verified keyboard and mouse state handling.
+Run:  sudo -E python3 hid_ble_bridge.py --device-mac <MAC_ADDRESS>
+ or:  sudo -E python3 hid_ble_bridge.py --device-name "HID Remote01"
+"""
+
+import asyncio
+import signal
+import argparse
+import subprocess
+from bleak import BleakClient, BleakScanner
+from evdev import UInput, ecodes as e
+from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
+
+# BLE UUIDs for HID Service and Characteristics
+UUID_HID_SERVICE = "00001812-0000-1000-8000-00805f9b34fb"  # HID Service
+UUID_HID_REPORT = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
+
+# Key Mappings for HID Usages
+USAGE_TO_EVKEY = {
+    **{i: getattr(e, f"KEY_{chr(ord('A') + (i - 0x04))}") for i in range(0x04, 0x1e)},  # A-Z
+    0x1e: e.KEY_1, 0x1f: e.KEY_2, 0x20: e.KEY_3, 0x21: e.KEY_4, 0x22: e.KEY_5,
+    0x23: e.KEY_6, 0x24: e.KEY_7, 0x25: e.KEY_8, 0x26: e.KEY_9, 0x27: e.KEY_0,
+    0x28: e.KEY_ENTER, 0x29: e.KEY_ESC, 0x2a: e.KEY_BACKSPACE, 0x2b: e.KEY_TAB,
+    0x2c: e.KEY_SPACE, 0x2d: e.KEY_MINUS, 0x2e: e.KEY_EQUAL, 0x2f: e.KEY_LEFTBRACE,
+    0x30: e.KEY_RIGHTBRACE, 0x31: e.KEY_BACKSLASH, 0x33: e.KEY_SEMICOLON,
+    0x34: e.KEY_APOSTROPHE, 0x35: e.KEY_GRAVE, 0x36: e.KEY_COMMA,
+    0x37: e.KEY_DOT, 0x38: e.KEY_SLASH, 0x39: e.KEY_CAPSLOCK,
+    0x3a: e.KEY_F1, 0x3b: e.KEY_F2, 0x3c: e.KEY_F3, 0x3d: e.KEY_F4,
+    0x3e: e.KEY_F5, 0x3f: e.KEY_F6, 0x40: e.KEY_F7, 0x41: e.KEY_F8,
+    0x42: e.KEY_F9, 0x43: e.KEY_F10, 0x44: e.KEY_F11, 0x45: e.KEY_F12,
+    0x4f: e.KEY_RIGHT, 0x50: e.KEY_LEFT, 0x51: e.KEY_DOWN, 0x52: e.KEY_UP,  # Arrow keys
+}
+
+# Expanded media/consumer usage mappings (common HID Consumer Page codes)
+MEDIA_USAGE_TO_EVKEY = {
+    0x00B0: e.KEY_PLAY,           # Play
+    0x00B1: e.KEY_PAUSE,          # Pause
+    0x00B2: e.KEY_RECORD,         # Record
+    0x00B3: e.KEY_FASTFORWARD,    # Fast Forward
+    0x00B4: e.KEY_REWIND,         # Rewind
+    0x00B5: e.KEY_NEXTSONG,       # Scan Next Track
+    0x00B6: e.KEY_PREVIOUSSONG,   # Scan Previous Track
+    0x00B7: e.KEY_STOP,           # Stop
+    0x00B8: e.KEY_EJECTCD,        # Eject
+    0x00CD: e.KEY_PLAYPAUSE,      # Play/Pause toggle
+    0x00E2: e.KEY_MUTE,           # Mute
+    0x00E9: e.KEY_VOLUMEUP,       # Volume Up
+    0x00EA: e.KEY_VOLUMEDOWN,     # Volume Down
+    0x0183: e.KEY_CONFIG,         # Consumer Control Configuration
+    0x018A: e.KEY_MAIL,           # AL Email Reader
+    0x0192: e.KEY_CALC,           # AL Calculator
+    0x0194: e.KEY_FILE,           # AL Local Machine Browser
+    0x0223: e.KEY_HOMEPAGE,       # AC Home
+    0x0224: e.KEY_BACK,           # AC Back
+    0x0225: e.KEY_FORWARD,        # AC Forward
+    0x0226: e.KEY_STOP,           # AC Stop
+    0x0227: e.KEY_REFRESH,        # AC Refresh
+    0x022A: e.KEY_BOOKMARKS,      # AC Bookmarks
+}
+
+MOD_BITS_TO_EVKEY = {
+    0: e.KEY_LEFTCTRL, 1: e.KEY_LEFTSHIFT, 2: e.KEY_LEFTALT, 3: e.KEY_LEFTMETA,
+    4: e.KEY_RIGHTCTRL, 5: e.KEY_RIGHTSHIFT, 6: e.KEY_RIGHTALT, 7: e.KEY_RIGHTMETA,
+}
+
+# Reverse lookup for readable key names (handles aliases safely)
+KEYCODE_TO_NAME = {}
+for name, code in e.ecodes.items():
+    if not name.startswith("KEY_"):
+        continue
+    if isinstance(code, int):
+        KEYCODE_TO_NAME[code] = name
+    elif isinstance(code, list):
+        for c in code:
+            KEYCODE_TO_NAME[c] = name
+
+# Task management and key tracking
+notification_tasks = []
+key_states = set()
+media_pressed_by_source = {}  # track currently pressed media keys per source
+stop_loop = False
+
+debug = False
+def printlog(data):
+    global debug
+    if debug:
+        print(data)
+
+# ==============================================================================
+# bluetoothctl helper functions for device preparation
+# ==============================================================================
+
+def run_bluetoothctl(*args: str) -> subprocess.CompletedProcess:
+    cmd = ["bluetoothctl"] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+
+def get_controller_power():
+    result = run_bluetoothctl("show")
+    info = {"powered": False}
+    if result.returncode != 0:
+        return info
+    for line in result.stdout.splitlines():
+        line_lower = line.strip().lower()
+        if line_lower.startswith("powered:"):
+            info["powered"] = "yes" in line_lower
+    return info
+
+def get_device_info(mac_address: str) -> dict:
+    result = run_bluetoothctl("info", mac_address)
+    info = {"paired": False, "bonded": False, "trusted": False, "connected": False}
+    if result.returncode != 0:
+        return info
+
+    for line in result.stdout.splitlines():
+        line_lower = line.strip().lower()
+        if line_lower.startswith("paired:"):
+            info["paired"] = "yes" in line_lower
+        elif line_lower.startswith("bonded:"):
+            info["bonded"] = "yes" in line_lower
+        elif line_lower.startswith("trusted:"):
+            info["trusted"] = "yes" in line_lower
+        elif line_lower.startswith("connected:"):
+            info["connected"] = "yes" in line_lower
+    return info
+
+
+def get_paired_devices() -> dict:
+    result = run_bluetoothctl("devices", "Paired")
+    devices = {}
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if line.startswith("Device "):
+                parts = line.split(" ", 2)
+                if len(parts) == 3:
+                    mac = parts[1]
+                    name = parts[2]
+                    devices[name] = mac
+    return devices
+
+
+async def find_device_by_name(device_name: str, scan_timeout: float = 10.0) -> str:
+    paired_devices = get_paired_devices()
+    for name, mac in paired_devices.items():
+        if device_name.lower() in name.lower():
+            printlog(f"Found paired device '{name}' with MAC address {mac}.")
+            return mac
+
+    printlog(f"Device not paired. Scanning for '{device_name}'...")
+    found_device = None
+
+    def detection_callback(device, advertisement_data):
+        nonlocal found_device
+        if device.name and device_name.lower() in device.name.lower():
+            found_device = device
+
+    scanner = BleakScanner(detection_callback=detection_callback)
+    try:
+        await scanner.start()
+        start_time = asyncio.get_event_loop().time()
+        while found_device is None:
+            if asyncio.get_event_loop().time() - start_time > scan_timeout:
+                break
+            await asyncio.sleep(0.1)
+    except Exception as ex:
+        printlog(f"Error during scan: {ex}")
+    finally:
+        await scanner.stop()
+
+    if found_device:
+        printlog(f"Found device '{found_device.name}' at {found_device.address}.")
+        return found_device.address
+
+    printlog(f"Could not find device named '{device_name}'.")
+    return None
+
+
+async def prepare_device_for_connection(mac_address: str) -> bool:
+    info = get_device_info(mac_address)
+    printlog(f"Device state: Paired={info['paired']}, Bonded={info['bonded']}, "
+          f"Trusted={info['trusted']}, Connected={info['connected']}")
+
+    if info["connected"]:
+        printlog("Device is connected. Disconnecting...")
+        run_bluetoothctl("disconnect", mac_address)
+        await asyncio.sleep(1)
+        info = get_device_info(mac_address)
+        if info["connected"]:
+            printlog("Error: Failed to disconnect device.")
+            return False
+        printlog("Device disconnected.")
+
+    if info["paired"] and not info["bonded"]:
+        printlog("Error: Device is paired but not bonded. Please remove and re-pair the device.")
+        return False
+
+    if info["trusted"]:
+        printlog("Device is trusted. Removing trust to prevent auto-connect...")
+        run_bluetoothctl("untrust", mac_address)
+        await asyncio.sleep(0.5)
+        printlog("Device untrusted.")
+
+    if not info["paired"]:
+        printlog("Device is not paired. Bleak will handle pairing automatically.")
+
+    printlog("Device is ready for connection.")
+    return True
+
+
+# ==============================================================================
+# HID handling functions with enhanced logging
+# ==============================================================================
+
+def press(ui: UInput, keycode: int):
+    ui.write(e.EV_KEY, keycode, 1)
+    ui.syn()
+
+
+def release(ui: UInput, keycode: int):
+    ui.write(e.EV_KEY, keycode, 0)
+    ui.syn()
+
+
+def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
+    for bit, button in enumerate([e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE]):
+        if buttons & (1 << bit):
+            ui.write(e.EV_KEY, button, 1)
+        else:
+            ui.write(e.EV_KEY, button, 0)
+
+    ui.write(e.EV_REL, e.REL_X, x)
+    ui.write(e.EV_REL, e.REL_Y, y)
+    if scroll != 0:
+        ui.write(e.EV_REL, e.REL_WHEEL, scroll)
+    ui.syn()
+
+
+def key_name(keycode: int) -> str:
+    return KEYCODE_TO_NAME.get(keycode, f"KEY_{keycode}")
+
+
+async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
+    global key_states, media_pressed_by_source
+    actions = []
+
+    # Media key report (2 bytes)
+    if len(data) == 2:
+        usage = int.from_bytes(data, "little")
+        media_pressed_by_source.setdefault(source, set())
+
+        if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
+            keycode = MEDIA_USAGE_TO_EVKEY[usage]
+            if keycode not in media_pressed_by_source[source]:
+                press(ui_kb, keycode)
+                media_pressed_by_source[source].add(keycode)
+                actions.append(f"{key_name(keycode)} Pressed")
+            else:
+                actions.append(f"{key_name(keycode)} (already pressed)")
+        elif usage == 0:
+            to_release = list(media_pressed_by_source[source])
+            for keycode in to_release:
+                release(ui_kb, keycode)
+                actions.append(f"{key_name(keycode)} Released")
+            media_pressed_by_source[source].clear()
+        else:
+            actions.append(f"Unknown media usage {usage}")
+
+    # Keyboard report (8 bytes)
+    elif len(data) == 8:
+        modifiers = data[0]
+        pressed_keys = {k for k in data[2:] if k != 0}
+
+        for bit, keycode in MOD_BITS_TO_EVKEY.items():
+            if modifiers & (1 << bit):
+                if keycode not in key_states:
+                    press(ui_kb, keycode)
+                    key_states.add(keycode)
+                    actions.append(f"{key_name(keycode)} Pressed")
+            elif keycode in key_states:
+                release(ui_kb, keycode)
+                key_states.remove(keycode)
+                actions.append(f"{key_name(keycode)} Released")
+
+        for key in pressed_keys:
+            keycode = USAGE_TO_EVKEY.get(key)
+            if keycode:
+                if keycode not in key_states:
+                    press(ui_kb, keycode)
+                    key_states.add(keycode)
+                    actions.append(f"{key_name(keycode)} Pressed")
+            else:
+                actions.append(f"Unknown key usage {key}")
+
+        for keycode in list(key_states):
+            if keycode in USAGE_TO_EVKEY.values() and keycode not in {USAGE_TO_EVKEY.get(k) for k in pressed_keys}:
+                release(ui_kb, keycode)
+                key_states.remove(keycode)
+                actions.append(f"{key_name(keycode)} Released")
+
+    # Mouse report (5 bytes)
+    elif len(data) == 5:
+        buttons = data[0]
+        x_mov = int.from_bytes(data[1:2], byteorder="little", signed=True)
+        y_mov = int.from_bytes(data[2:3], byteorder="little", signed=True)
+        scroll = int.from_bytes(data[4:5], byteorder="little", signed=True)
+        inject_mouse_event(ui_mouse, buttons, x_mov, y_mov, scroll)
+        actions.append(f"Mouse buttons={buttons:02x} x={x_mov} y={y_mov} scroll={scroll}")
+
+    else:
+        actions.append(f"Unsupported HID report length {len(data)}")
+
+    action_str = "; ".join(actions) if actions else "No mapped actions"
+    printlog(f"[{source}] Decoding HID report: {data.hex()}  {action_str}")
+
+
+async def notification_handler(client: BleakClient, handle: int, ui_kb: UInput, ui_mouse: UInput):
+    try:
+        await client.start_notify(
+            handle,
+            lambda _, data: asyncio.create_task(decode_hid_report_and_inject(ui_kb, ui_mouse, f"HID-{handle}", data)),
+        )
+        printlog(f"Started notifications for HID report (handle={handle}).")
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        printlog(f"Notification handler for handle {handle} canceled.")
+    finally:
+        try:
+            await client.stop_notify(handle)
+        except Exception as e:
+            printlog(f"Error stopping notifications: {e}")
+
+
+async def cleanup(client, tasks):
+    for task in tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except BleakDBusError:
+            pass
+    if client.is_connected:
+        try:
+            await client.disconnect()
+        except EOFError:
+            printlog("Disconnect interrupted (EOFError) during shutdown; ignoring.")
+        except Exception as e:
+            printlog(f"Error during disconnect: {e}")
+
+
+# ==============================================================================
+# main
+# ==============================================================================
+
+async def main():
+    parser = argparse.ArgumentParser(description="BLE HID Bridge with detailed feedback.")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--device-mac", help="Bluetooth MAC address.")
+    group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
+    parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
+    parser.add_argument("--debug", action="store_true", help="Enable messages on console")
+    args = parser.parse_args()
+
+    global stop_loop, debug
+
+    if args.debug:
+        debug = True
+
+    while True:
+        info = get_controller_power()
+        if info["powered"]:
+            break
+        else:
+            printlog("Controller is not ready")
+            await asyncio.sleep(2)
+
+    # Resolve MAC address
+    if args.device_name:
+        device_mac = await find_device_by_name(args.device_name, args.scan_timeout)
+        if device_mac is None:
+            return
+    else:
+        device_mac = args.device_mac
+
+    # Prepare the device (disconnect if connected, check bonding, untrust)
+    ready = await prepare_device_for_connection(device_mac)
+    if not ready:
+        return
+
+    stop_event = asyncio.Event()
+    client = BleakClient(device_mac)
+
+    def handle_sigint(signum, frame):
+        global stop_loop
+        stop_event.set()
+        if signum != signal.SIGHUP:
+            stop_loop = True
+
+    signal.signal(signal.SIGINT, handle_sigint)
+    signal.signal(signal.SIGTERM, handle_sigint)
+    signal.signal(signal.SIGQUIT, handle_sigint)
+    signal.signal(signal.SIGHUP, handle_sigint)
+
+    kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values())}
+    mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
+    ui_kb = UInput(kb_capabilities, name="pCP BLE HID Keyboard")
+    ui_mouse = UInput(mouse_capabilities, name="pCP BLE HID Mouse")
+
+    printlog(f"Virtual keyboard created: {ui_kb.device}")
+    printlog(f"Virtual mouse created: {ui_mouse.device}")
+
+    while not stop_loop:
+        printlog(f"Connecting to: {device_mac}...")
+        try:
+            await client.connect()
+            printlog(f"Connected to BLE device {device_mac}.")
+
+            hid_reports = [
+                char for svc in client.services if svc.uuid == UUID_HID_SERVICE
+                for char in svc.characteristics if char.uuid == UUID_HID_REPORT and "notify" in char.properties
+            ]
+            for char in hid_reports:
+                task = asyncio.create_task(notification_handler(client, char.handle, ui_kb, ui_mouse))
+                notification_tasks.append(task)
+
+            printlog("Waiting for input events. Press Ctrl+C to quit.")
+            await stop_event.wait()
+
+        except BleakDeviceNotFoundError as err:
+            printlog(f"{err}. Try pressing device button when launching")
+
+        finally:
+            await cleanup(client, notification_tasks)
+            await asyncio.sleep(3)
+            stop_event.clear()
+
+    printlog("Cleaning up...")
+    ui_kb.close()
+    ui_mouse.close()
+    printlog("Virtual devices stopped.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
