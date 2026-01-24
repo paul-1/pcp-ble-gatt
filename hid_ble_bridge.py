@@ -237,6 +237,44 @@ async def execute_trigger_command(command: str):
     except Exception as e:
         printlog(f"Error executing trigger command: {e}")
 
+async def handle_key_release_triggers(keycode: int, press_times: dict, active_modifiers: set, actions: list):
+    """
+    Handle trigger execution on key release based on hold duration.
+    
+    Args:
+        keycode: The key that was released
+        press_times: Dictionary tracking press times (either key_press_times or media_press_times)
+        active_modifiers: Set of currently active modifier keycodes
+        actions: List to append action descriptions to
+    
+    Returns:
+        None (modifies press_times dict and actions list in place)
+    """
+    if keycode in press_times:
+        press_time = press_times[keycode]
+        current_time = time.time()
+        hold_duration = current_time - press_time
+        del press_times[keycode]
+        
+        # Check which trigger to execute based on hold duration
+        if hold_duration >= MIN_HOLD_DURATION:
+            # Key was held >= 0.5s, execute value 2 trigger
+            actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
+            command = match_trigger(keycode, 2, active_modifiers)
+            if command:
+                await execute_trigger_command(command)
+        else:
+            # Key was held < 0.5s, execute value 1 trigger
+            actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
+            command = match_trigger(keycode, 1, active_modifiers)
+            if command:
+                await execute_trigger_command(command)
+        
+        # Also check for release trigger (value 0)
+        command = match_trigger(keycode, 0, active_modifiers)
+        if command:
+            await execute_trigger_command(command)
+
 # ==============================================================================
 # UInput device creation with retry logic
 # ==============================================================================
@@ -457,31 +495,8 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Calculate hold duration and execute appropriate trigger
-                if keycode in media_press_times:
-                    press_time = media_press_times[keycode]
-                    current_time = time.time()
-                    hold_duration = current_time - press_time
-                    del media_press_times[keycode]
-                    
-                    # Check which trigger to execute based on hold duration
-                    if hold_duration >= MIN_HOLD_DURATION:
-                        # Key was held >= 0.5s, execute value 2 trigger
-                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
-                        command = match_trigger(keycode, 2, current_modifiers)
-                        if command:
-                            await execute_trigger_command(command)
-                    else:
-                        # Key was held < 0.5s, execute value 1 trigger
-                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
-                        command = match_trigger(keycode, 1, current_modifiers)
-                        if command:
-                            await execute_trigger_command(command)
-                    
-                    # Also check for release trigger (value 0)
-                    command = match_trigger(keycode, 0, current_modifiers)
-                    if command:
-                        await execute_trigger_command(command)
+                # Handle trigger execution based on hold duration
+                await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
                 
             media_pressed_by_source[source].clear()
         else:
@@ -527,31 +542,8 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Calculate hold duration and execute appropriate trigger
-                if keycode in key_press_times:
-                    press_time = key_press_times[keycode]
-                    current_time = time.time()
-                    hold_duration = current_time - press_time
-                    del key_press_times[keycode]
-                    
-                    # Check which trigger to execute based on hold duration
-                    if hold_duration >= MIN_HOLD_DURATION:
-                        # Key was held >= 0.5s, execute value 2 trigger
-                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
-                        command = match_trigger(keycode, 2, current_modifiers)
-                        if command:
-                            await execute_trigger_command(command)
-                    else:
-                        # Key was held < 0.5s, execute value 1 trigger
-                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
-                        command = match_trigger(keycode, 1, current_modifiers)
-                        if command:
-                            await execute_trigger_command(command)
-                    
-                    # Also check for release trigger (value 0)
-                    command = match_trigger(keycode, 0, current_modifiers)
-                    if command:
-                        await execute_trigger_command(command)
+                # Handle trigger execution based on hold duration
+                await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
 
     # Mouse report (5 bytes)
     elif len(data) == 5:
