@@ -88,9 +88,14 @@ for name, code in e.ecodes.items():
 # Task management and key tracking
 notification_tasks = []
 key_states = set()
+key_press_times = {}  # track when keys were pressed for hold duration
 media_pressed_by_source = {}  # track currently pressed media keys per source
+media_press_times = {}  # track when media keys were pressed for hold duration
 current_modifiers = set()  # track currently active modifiers for trigger matching
 stop_loop = False
+
+# Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
+MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
 
 debug = False
 def printlog(data):
@@ -428,7 +433,7 @@ def key_name(keycode: int) -> str:
 
 
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
-    global key_states, media_pressed_by_source, current_modifiers
+    global key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
     actions = []
 
     # Media key report (2 bytes)
@@ -438,9 +443,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 
         if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
             keycode = MEDIA_USAGE_TO_EVKEY[usage]
+            current_time = time.time()
+            
             if keycode not in media_pressed_by_source[source]:
                 press(ui_kb, keycode)
                 media_pressed_by_source[source].add(keycode)
+                media_press_times[keycode] = current_time
                 actions.append(f"{key_name(keycode)} Pressed")
                 
                 # Check for trigger match (press event = value 1)
@@ -449,19 +457,29 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 if command:
                     await execute_trigger_command(command)
             else:
-                # Media key is still held down (repeat/hold event)
-                actions.append(f"{key_name(keycode)} Held")
+                # Media key is still held down - check if held long enough for value 2
+                press_time = media_press_times.get(keycode, current_time)
+                hold_duration = current_time - press_time
                 
-                # Check for trigger match (hold/repeat event = value 2)
-                # Use global current_modifiers which are tracked from keyboard reports
-                command = match_trigger(keycode, 2, current_modifiers)
-                if command:
-                    await execute_trigger_command(command)
+                if hold_duration >= MIN_HOLD_DURATION:
+                    actions.append(f"{key_name(keycode)} Held ({hold_duration:.2f}s)")
+                    
+                    # Check for trigger match (hold/repeat event = value 2)
+                    # Use global current_modifiers which are tracked from keyboard reports
+                    command = match_trigger(keycode, 2, current_modifiers)
+                    if command:
+                        await execute_trigger_command(command)
+                else:
+                    actions.append(f"{key_name(keycode)} Held (waiting for {MIN_HOLD_DURATION}s threshold)")
         elif usage == 0:
             to_release = list(media_pressed_by_source[source])
             for keycode in to_release:
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
+                
+                # Remove from press times tracking
+                if keycode in media_press_times:
+                    del media_press_times[keycode]
                 
                 # Check for trigger match (release event = value 0)
                 # Use global current_modifiers which are tracked from keyboard reports
@@ -495,9 +513,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         for key in pressed_keys:
             keycode = USAGE_TO_EVKEY.get(key)
             if keycode:
+                current_time = time.time()
+                
                 if keycode not in key_states:
                     press(ui_kb, keycode)
                     key_states.add(keycode)
+                    key_press_times[keycode] = current_time
                     actions.append(f"{key_name(keycode)} Pressed")
                     
                     # Check for trigger match (press event = value 1)
@@ -505,14 +526,19 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     if command:
                         await execute_trigger_command(command)
                 else:
-                    # Key is still held down (repeat/hold event)
-                    # This matches triggerhappy behavior for value 2
-                    actions.append(f"{key_name(keycode)} Held")
+                    # Key is still held down - check if held long enough for value 2
+                    press_time = key_press_times.get(keycode, current_time)
+                    hold_duration = current_time - press_time
                     
-                    # Check for trigger match (hold/repeat event = value 2)
-                    command = match_trigger(keycode, 2, current_modifiers)
-                    if command:
-                        await execute_trigger_command(command)
+                    if hold_duration >= MIN_HOLD_DURATION:
+                        actions.append(f"{key_name(keycode)} Held ({hold_duration:.2f}s)")
+                        
+                        # Check for trigger match (hold/repeat event = value 2)
+                        command = match_trigger(keycode, 2, current_modifiers)
+                        if command:
+                            await execute_trigger_command(command)
+                    else:
+                        actions.append(f"{key_name(keycode)} Held (waiting for {MIN_HOLD_DURATION}s threshold)")
             else:
                 actions.append(f"Unknown key usage {key}")
 
@@ -521,6 +547,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 release(ui_kb, keycode)
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
+                
+                # Remove from press times tracking
+                if keycode in key_press_times:
+                    del key_press_times[keycode]
                 
                 # Check for trigger match (release event = value 0)
                 command = match_trigger(keycode, 0, current_modifiers)
@@ -579,13 +609,15 @@ async def cleanup(client, tasks):
             printlog(f"Error during disconnect: {e}")
     
     # Clear task list to prevent memory leaks on reconnection
-    global notification_tasks, key_states, media_pressed_by_source, current_modifiers
+    global notification_tasks, key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
     notification_tasks.clear()
     
     # Reset key states to prevent stuck keys after disconnect
     key_states.clear()
     media_pressed_by_source.clear()
     current_modifiers.clear()
+    key_press_times.clear()
+    media_press_times.clear()
 
 
 # ==============================================================================

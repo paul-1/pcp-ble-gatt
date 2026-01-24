@@ -190,10 +190,10 @@ Where:
 - `<event value>`: Event type
   - `0` = key release
   - `1` = key press (initial press)
-  - `2` = key hold/repeat (generated while key is held down)
+  - `2` = key hold/repeat (generated after key is held for 0.5 seconds)
 - `<command line>`: Command to execute when the trigger matches
 
-**Note on hold/repeat events (value 2)**: When a key is held down, the system will continuously receive HID reports with that key still pressed. Each subsequent report while the key remains pressed will trigger a value 2 event. This allows you to execute commands repeatedly while a key is held, similar to auto-repeat behavior.
+**Note on hold/repeat events (value 2)**: When a key is held down for at least 0.5 seconds (minimum hold duration), subsequent HID reports will trigger value 2 events. This prevents excessive command execution while still allowing repeat actions for things like volume adjustment. The minimum hold duration ensures commands don't fire on every HID report immediately after the initial press.
 
 Example `triggers.conf`:
 ```
