@@ -458,7 +458,11 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     await execute_trigger_command(command)
             else:
                 # Media key is still held down - check if held long enough for value 2
-                press_time = media_press_times.get(keycode, current_time)
+                # If we don't have a press time (shouldn't happen), record it now
+                if keycode not in media_press_times:
+                    media_press_times[keycode] = current_time
+                
+                press_time = media_press_times[keycode]
                 hold_duration = current_time - press_time
                 
                 if hold_duration >= MIN_HOLD_DURATION:
@@ -527,7 +531,11 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                         await execute_trigger_command(command)
                 else:
                     # Key is still held down - check if held long enough for value 2
-                    press_time = key_press_times.get(keycode, current_time)
+                    # If we don't have a press time (shouldn't happen), record it now
+                    if keycode not in key_press_times:
+                        key_press_times[keycode] = current_time
+                    
+                    press_time = key_press_times[keycode]
                     hold_duration = current_time - press_time
                     
                     if hold_duration >= MIN_HOLD_DURATION:
