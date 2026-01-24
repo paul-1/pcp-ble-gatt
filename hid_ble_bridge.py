@@ -448,7 +448,8 @@ async def main():
     # Define disconnect callback to detect when device disconnects
     def disconnected_callback(client):
         try:
-            printlog("Device disconnected. Will attempt to reconnect...")
+            if not stop_event.is_set():
+                printlog("Device disconnected. Will attempt to reconnect...")
             stop_event.set()
         except Exception as e:
             printlog(f"Error in disconnect callback: {e}")
