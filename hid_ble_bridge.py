@@ -78,9 +78,12 @@ for name, code in e.ecodes.items():
         KEYCODE_TO_NAME[code] = name
         NAME_TO_KEYCODE[name] = code
     elif isinstance(code, list):
+        # For aliases, use the first code and store all names
         for c in code:
             KEYCODE_TO_NAME[c] = name
-            NAME_TO_KEYCODE[name] = c
+        # Store only first code for reverse lookup to avoid overwriting
+        if name not in NAME_TO_KEYCODE:
+            NAME_TO_KEYCODE[name] = code[0]
 
 # Task management and key tracking
 notification_tasks = []
@@ -100,6 +103,7 @@ def printlog(data):
 # ==============================================================================
 
 triggers = []  # List of (event_keys, event_value, command) tuples
+MAX_LOG_COMMAND_LENGTH = 50  # Maximum length of command to log (for security)
 
 def parse_triggers_file(filepath: str) -> list:
     """
@@ -140,8 +144,8 @@ def parse_triggers_file(filepath: str) -> list:
                 event_keys = event_name.split('+')
                 
                 parsed_triggers.append((event_keys, event_value, command))
-                # Log only first 50 chars of command to avoid exposing sensitive data
-                safe_command = command[:50] + "..." if len(command) > 50 else command
+                # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
+                safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
                 printlog(f"Loaded trigger: {event_keys} = {event_value} -> {safe_command}")
     
     except Exception as e:
@@ -221,9 +225,10 @@ async def execute_trigger_command(command: str):
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL
         )
-        # Log only the first 50 characters to avoid exposing sensitive data
-        safe_command = command[:50] + "..." if len(command) > 50 else command
+        # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
+        safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
         printlog(f"Executed trigger: {safe_command}")
+        # Note: We don't wait for the process to complete to avoid blocking
     except Exception as e:
         printlog(f"Error executing trigger command: {e}")
 
