@@ -11,6 +11,7 @@ import signal
 import argparse
 import subprocess
 import time
+import os
 from bleak import BleakClient, BleakScanner
 from evdev import UInput, ecodes as e
 from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
@@ -69,26 +70,211 @@ MOD_BITS_TO_EVKEY = {
 
 # Reverse lookup for readable key names (handles aliases safely)
 KEYCODE_TO_NAME = {}
+NAME_TO_KEYCODE = {}  # Reverse lookup for efficiency
 for name, code in e.ecodes.items():
     if not name.startswith("KEY_"):
         continue
     if isinstance(code, int):
         KEYCODE_TO_NAME[code] = name
+        NAME_TO_KEYCODE[name] = code
     elif isinstance(code, list):
+        # For aliases, use the first code and store all names
         for c in code:
             KEYCODE_TO_NAME[c] = name
+        # Store only first code for reverse lookup to avoid overwriting
+        if name not in NAME_TO_KEYCODE:
+            NAME_TO_KEYCODE[name] = code[0]
 
 # Task management and key tracking
 notification_tasks = []
 key_states = set()
+key_press_times = {}  # track when keys were pressed for hold duration
 media_pressed_by_source = {}  # track currently pressed media keys per source
+media_press_times = {}  # track when media keys were pressed for hold duration
+current_modifiers = set()  # track currently active modifiers for trigger matching
 stop_loop = False
+
+# Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
+MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
 
 debug = False
 def printlog(data):
     global debug
     if debug:
         print(data)
+
+# ==============================================================================
+# Trigger configuration handling
+# ==============================================================================
+
+triggers = []  # List of (event_keys, event_value, command) tuples
+MAX_LOG_COMMAND_LENGTH = 50  # Maximum length of command to log (for security)
+
+def parse_triggers_file(filepath: str) -> list:
+    """
+    Parse triggerhappy-style configuration file.
+    Format: <event name>	<event value>	<command line>
+    
+    Returns list of tuples: (event_keys, event_value, command)
+    where event_keys is a list of key names (first is main key, rest are modifiers)
+    
+    Note: Caller should verify file exists before calling this function.
+    """
+    parsed_triggers = []
+    
+    try:
+        with open(filepath, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Split on whitespace, limiting to 3 parts
+                parts = line.split(None, 2)
+                if len(parts) < 3:
+                    printlog(f"Warning: Invalid trigger line {line_num}: {line}")
+                    continue
+                
+                event_name, event_value_str, command = parts
+                
+                # Parse event value
+                try:
+                    event_value = int(event_value_str)
+                except ValueError:
+                    printlog(f"Warning: Invalid event value on line {line_num}: {event_value_str}")
+                    continue
+                
+                # Parse event name (may include modifiers with +)
+                event_keys = event_name.split('+')
+                
+                parsed_triggers.append((event_keys, event_value, command))
+                # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
+                safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
+                printlog(f"Loaded trigger: {event_keys} = {event_value} -> {safe_command}")
+    
+    except Exception as e:
+        printlog(f"Error reading trigger file {filepath}: {e}")
+    
+    return parsed_triggers
+
+def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
+    """
+    Check if a key event matches any configured trigger.
+    
+    Args:
+        keycode: The evdev keycode that was pressed/released
+        value: Event value (0=release, 1=press, 2=hold/repeat)
+        active_modifiers: Set of currently active modifier keycodes
+    
+    Returns:
+        Command string to execute, or None if no match
+    """
+    global triggers
+    
+    # Get the key name for the keycode
+    key_name = KEYCODE_TO_NAME.get(keycode)
+    if not key_name:
+        return None
+    
+    # Find all matching triggers and select the most specific one
+    matches = []
+    
+    for trigger_keys, trigger_value, command in triggers:
+        # Check if event value matches
+        if trigger_value != value:
+            continue
+        
+        # First key in trigger_keys is the main key
+        main_key = trigger_keys[0]
+        modifier_keys = set(trigger_keys[1:])
+        
+        # Check if main key matches
+        if main_key != key_name:
+            continue
+        
+        # Check if all required modifiers are active (use NAME_TO_KEYCODE for efficiency)
+        required_modifier_codes = set()
+        for mod_name in modifier_keys:
+            mod_code = NAME_TO_KEYCODE.get(mod_name)
+            if mod_code is not None:
+                required_modifier_codes.add(mod_code)
+            else:
+                # Log warning for unknown modifier names
+                printlog(f"Warning: Unknown modifier key name '{mod_name}' in trigger configuration")
+        
+        # Check if required modifiers are a subset of active modifiers
+        # This allows additional modifiers to be pressed (standard triggerhappy behavior)
+        if required_modifier_codes.issubset(active_modifiers):
+            matches.append((len(required_modifier_codes), command))
+    
+    # Return the most specific match (most modifiers)
+    if matches:
+        matches.sort(reverse=True)  # Sort by number of modifiers, descending
+        return matches[0][1]
+    
+    return None
+
+async def execute_trigger_command(command: str):
+    """
+    Execute a trigger command asynchronously in the background.
+    Uses shell execution for compatibility with triggerhappy behavior.
+    WARNING: Commands are executed via shell - only use trusted configuration files.
+    """
+    try:
+        # Run command in background without waiting for completion
+        # Note: Using shell=True for compatibility with triggerhappy format
+        # Users should only use trusted trigger configuration files
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
+        safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
+        printlog(f"Executed trigger: {safe_command}")
+        # Note: We don't wait for the process to complete to avoid blocking
+    except Exception as e:
+        printlog(f"Error executing trigger command: {e}")
+
+async def handle_key_release_triggers(keycode: int, press_times: dict, active_modifiers: set, actions: list):
+    """
+    Handle trigger execution on key release based on hold duration.
+    
+    Args:
+        keycode: The key that was released
+        press_times: Dictionary tracking press times (either key_press_times or media_press_times)
+        active_modifiers: Set of currently active modifier keycodes
+        actions: List to append action descriptions to
+    
+    Returns:
+        List of commands to execute (returned to allow logging after main HID report log)
+    """
+    commands_to_execute = []
+    
+    if keycode in press_times:
+        press_time = press_times[keycode]
+        current_time = time.time()
+        hold_duration = current_time - press_time
+        del press_times[keycode]
+        
+        # Check which trigger to execute based on hold duration
+        if hold_duration >= MIN_HOLD_DURATION:
+            # Key was held >= 0.5s, execute value 2 trigger
+            actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
+            if command := match_trigger(keycode, 2, active_modifiers):
+                commands_to_execute.append(command)
+        else:
+            # Key was held < 0.5s, execute value 1 trigger
+            actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
+            if command := match_trigger(keycode, 1, active_modifiers):
+                commands_to_execute.append(command)
+        
+        # Also check for release trigger (value 0)
+        if command := match_trigger(keycode, 0, active_modifiers):
+            commands_to_execute.append(command)
+    
+    return commands_to_execute
 
 # ==============================================================================
 # UInput device creation with retry logic
@@ -286,8 +472,9 @@ def key_name(keycode: int) -> str:
 
 
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
-    global key_states, media_pressed_by_source
+    global key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
     actions = []
+    commands_to_execute = []
 
     # Media key report (2 bytes)
     if len(data) == 2:
@@ -296,17 +483,24 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 
         if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
             keycode = MEDIA_USAGE_TO_EVKEY[usage]
+            current_time = time.time()
+            
             if keycode not in media_pressed_by_source[source]:
                 press(ui_kb, keycode)
                 media_pressed_by_source[source].add(keycode)
+                media_press_times[keycode] = current_time
                 actions.append(f"{key_name(keycode)} Pressed")
-            else:
-                actions.append(f"{key_name(keycode)} (already pressed)")
+                # Note: We don't execute triggers on press, only on release
         elif usage == 0:
             to_release = list(media_pressed_by_source[source])
             for keycode in to_release:
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
+                
+                # Collect commands to execute after logging
+                cmds = await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
+                commands_to_execute.extend(cmds)
+                
             media_pressed_by_source[source].clear()
         else:
             actions.append(f"Unknown media usage {usage}")
@@ -316,8 +510,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         modifiers = data[0]
         pressed_keys = {k for k in data[2:] if k != 0}
 
+        # Update global modifier state
+        current_modifiers.clear()
+        
         for bit, keycode in MOD_BITS_TO_EVKEY.items():
             if modifiers & (1 << bit):
+                current_modifiers.add(keycode)
                 if keycode not in key_states:
                     press(ui_kb, keycode)
                     key_states.add(keycode)
@@ -330,10 +528,14 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         for key in pressed_keys:
             keycode = USAGE_TO_EVKEY.get(key)
             if keycode:
+                current_time = time.time()
+                
                 if keycode not in key_states:
                     press(ui_kb, keycode)
                     key_states.add(keycode)
+                    key_press_times[keycode] = current_time
                     actions.append(f"{key_name(keycode)} Pressed")
+                    # Note: We don't execute triggers on press, only on release
             else:
                 actions.append(f"Unknown key usage {key}")
 
@@ -342,6 +544,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 release(ui_kb, keycode)
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
+                
+                # Collect commands to execute after logging
+                cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
+                commands_to_execute.extend(cmds)
 
     # Mouse report (5 bytes)
     elif len(data) == 5:
@@ -357,6 +563,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 
     action_str = "; ".join(actions) if actions else "No mapped actions"
     printlog(f"[{source}] Decoding HID report: {data.hex()}  {action_str}")
+    
+    # Execute commands AFTER logging, so logs appear in correct order
+    for command in commands_to_execute:
+        await execute_trigger_command(command)
 
 
 async def notification_handler(client: BleakClient, handle: int, ui_kb: UInput, ui_mouse: UInput):
@@ -395,13 +605,15 @@ async def cleanup(client, tasks):
             printlog(f"Error during disconnect: {e}")
     
     # Clear task list to prevent memory leaks on reconnection
-    global notification_tasks
+    global notification_tasks, key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
     notification_tasks.clear()
     
     # Reset key states to prevent stuck keys after disconnect
-    global key_states, media_pressed_by_source
     key_states.clear()
     media_pressed_by_source.clear()
+    current_modifiers.clear()
+    key_press_times.clear()
+    media_press_times.clear()
 
 
 # ==============================================================================
@@ -415,12 +627,22 @@ async def main():
     group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
     parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
     parser.add_argument("--debug", action="store_true", help="Enable messages on console")
+    parser.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
     args = parser.parse_args()
 
-    global stop_loop, debug
+    global stop_loop, debug, triggers
 
     if args.debug:
         debug = True
+
+    # Load trigger configuration if specified
+    if args.triggers:
+        if os.path.isfile(args.triggers):
+            triggers = parse_triggers_file(args.triggers)
+            printlog(f"Loaded {len(triggers)} trigger(s) from {args.triggers}")
+        else:
+            printlog(f"Warning: Trigger file not found: {args.triggers}")
+            printlog("Continuing without trigger handling...")
 
     while True:
         info = get_controller_power()

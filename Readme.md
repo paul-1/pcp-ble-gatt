@@ -9,6 +9,7 @@ A Python application that bridges Bluetooth Low Energy (BLE) HID devices (keyboa
 - **Key Handling**: Supports standard keyboard keys, modifiers, media keys, and mouse movements/clicks.
 - **Device Preparation**: Automatically handles pairing, bonding, and trust management via `bluetoothctl`.
 - **Robust Reconnection**: Automatically attempts reconnection on disconnection.
+- **Built-in Trigger Support**: Direct command execution on key events without external dependencies.
 - **Debug Mode**: Optional verbose logging for troubleshooting.
 
 ---
@@ -36,12 +37,12 @@ Standard library modules used (no additional installation needed):
 - `signal`
 - `argparse`
 - `subprocess`
+- `os`
 
 ### System Dependencies
 
 Ensure the following system packages are available:
-- Bluetooth system:
-- triggerhappy or some other handling for input events.
+- pCP Bluetooth system, installed through the pCP Bluetooth menu on the web interface.
 
 ---
 
@@ -70,7 +71,6 @@ Follow these steps to get the application running on PiCorePlayer:
    - download:
      ```ash
      wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/hid_ble_bridge.py
-     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/start_ble_events.sh
      wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/le_auto_pair.sh
      pcp bu
      ```
@@ -159,13 +159,72 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --debug
 
 ### Additional Options
 - `--scan-timeout <seconds>`: Timeout for device scanning by name (default: 10.0)
+- `--triggers <path>`: Path to trigger configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events.
 
-- Press `Ctrl+C` to stop the application.
+---
 
--  `start_ble_events.sh`  This script will
-    - Automatically find the required device events
-    - Start triggerhappy in dump mode, printing device inputs to console.
-    - You will need to create your triggerhappy configuration and edit this script to use it. A sample is found: https://github.com/paul-1/pcp-ble-gatt/blob/main/triggerhappy.conf
+### Trigger Configuration
+
+The application now supports direct trigger handling. This allows key events to directly execute commands.
+
+**Security Note**: Commands in the trigger configuration file are executed via shell. Only use trigger configuration files from trusted sources, and never allow untrusted users to modify your trigger configuration file.
+
+#### Enabling Trigger Support
+
+Use the `--triggers` option to specify a configuration file:
+
+```ash
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --triggers /path/to/triggers.conf
+```
+
+#### Trigger Configuration Format
+
+The trigger configuration file follows the format:
+```
+<event name>	<event value>	<command line>
+```
+
+Where:
+- `<event name>`: Key name (e.g., `KEY_PLAYPAUSE`, `KEY_VOLUMEUP`)
+- `<event value>`: Event type based on how long the key was held before release
+  - `0` = key release (always available after any key release)
+  - `1` = short press (key was held for less than 0.5 seconds)
+  - `2` = long press/hold (key was held for 0.5 seconds or more)
+- `<command line>`: Command to execute when the trigger matches
+
+**Note on press duration detection**: The system waits for a complete press-and-release cycle before determining which trigger to execute. When you press a key, it records the press time. When you release the key, it calculates how long the key was held and executes either the value 1 trigger (< 0.5s) or value 2 trigger (>= 0.5s). This means:
+- Value 1 triggers execute on release after a short press
+- Value 2 triggers execute on release after a long press
+- Value 0 triggers execute on any release (optional, for cleanup actions)
+
+**Important**: Unlike some systems where value 2 means "repeat", in this implementation value 2 means "long press". You get ONE trigger execution per key release, not continuous repeats.
+
+Example `triggers.conf`:
+```
+# Short press actions (key held < 0.5s)
+KEY_PLAYPAUSE   1   /usr/local/bin/pcp pause
+
+# Long press actions (key held >= 0.5s)
+KEY_PLAYPAUSE   2   /usr/local/bin/pcp stop
+
+# Can have both short and long press for same key
+KEY_NEXTSONG    1   /usr/local/bin/pcp next
+KEY_NEXTSONG    2   /usr/local/bin/pcp random
+
+# Simple single action (short press only)
+KEY_VOLUMEUP    1   /usr/local/bin/pcp up
+KEY_VOLUMEDOWN  1   /usr/local/bin/pcp down
+```
+
+#### Modifier Keys
+
+You can also specify modifier keys by appending them with `+`:
+```
+KEY_VOLUMEUP+KEY_LEFTSHIFT  1  /usr/local/bin/pcp up_big
+KEY_A+KEY_LEFTCTRL          1  /usr/bin/echo "Ctrl+A pressed"
+```
+
+The application will only trigger the command when all specified modifier keys are pressed together with the main key.
 
 ### Finally Set Automatic Start
    
