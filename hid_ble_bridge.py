@@ -450,46 +450,39 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 media_pressed_by_source[source].add(keycode)
                 media_press_times[keycode] = current_time
                 actions.append(f"{key_name(keycode)} Pressed")
-                
-                # Check for trigger match (press event = value 1)
-                # Use global current_modifiers which are tracked from keyboard reports
-                command = match_trigger(keycode, 1, current_modifiers)
-                if command:
-                    await execute_trigger_command(command)
-            else:
-                # Media key is still held down - check if held long enough for value 2
-                # If we don't have a press time (shouldn't happen), record it now
-                if keycode not in media_press_times:
-                    media_press_times[keycode] = current_time
-                
-                press_time = media_press_times[keycode]
-                hold_duration = current_time - press_time
-                
-                if hold_duration >= MIN_HOLD_DURATION:
-                    actions.append(f"{key_name(keycode)} Held ({hold_duration:.2f}s)")
-                    
-                    # Check for trigger match (hold/repeat event = value 2)
-                    # Use global current_modifiers which are tracked from keyboard reports
-                    command = match_trigger(keycode, 2, current_modifiers)
-                    if command:
-                        await execute_trigger_command(command)
-                else:
-                    actions.append(f"{key_name(keycode)} Held (waiting for {MIN_HOLD_DURATION}s threshold)")
+                # Note: We don't execute triggers on press, only on release
         elif usage == 0:
             to_release = list(media_pressed_by_source[source])
             for keycode in to_release:
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Remove from press times tracking
+                # Calculate hold duration and execute appropriate trigger
                 if keycode in media_press_times:
+                    press_time = media_press_times[keycode]
+                    current_time = time.time()
+                    hold_duration = current_time - press_time
                     del media_press_times[keycode]
+                    
+                    # Check which trigger to execute based on hold duration
+                    if hold_duration >= MIN_HOLD_DURATION:
+                        # Key was held >= 0.5s, execute value 2 trigger
+                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
+                        command = match_trigger(keycode, 2, current_modifiers)
+                        if command:
+                            await execute_trigger_command(command)
+                    else:
+                        # Key was held < 0.5s, execute value 1 trigger
+                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
+                        command = match_trigger(keycode, 1, current_modifiers)
+                        if command:
+                            await execute_trigger_command(command)
+                    
+                    # Also check for release trigger (value 0)
+                    command = match_trigger(keycode, 0, current_modifiers)
+                    if command:
+                        await execute_trigger_command(command)
                 
-                # Check for trigger match (release event = value 0)
-                # Use global current_modifiers which are tracked from keyboard reports
-                command = match_trigger(keycode, 0, current_modifiers)
-                if command:
-                    await execute_trigger_command(command)
             media_pressed_by_source[source].clear()
         else:
             actions.append(f"Unknown media usage {usage}")
@@ -524,29 +517,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     key_states.add(keycode)
                     key_press_times[keycode] = current_time
                     actions.append(f"{key_name(keycode)} Pressed")
-                    
-                    # Check for trigger match (press event = value 1)
-                    command = match_trigger(keycode, 1, current_modifiers)
-                    if command:
-                        await execute_trigger_command(command)
-                else:
-                    # Key is still held down - check if held long enough for value 2
-                    # If we don't have a press time (shouldn't happen), record it now
-                    if keycode not in key_press_times:
-                        key_press_times[keycode] = current_time
-                    
-                    press_time = key_press_times[keycode]
-                    hold_duration = current_time - press_time
-                    
-                    if hold_duration >= MIN_HOLD_DURATION:
-                        actions.append(f"{key_name(keycode)} Held ({hold_duration:.2f}s)")
-                        
-                        # Check for trigger match (hold/repeat event = value 2)
-                        command = match_trigger(keycode, 2, current_modifiers)
-                        if command:
-                            await execute_trigger_command(command)
-                    else:
-                        actions.append(f"{key_name(keycode)} Held (waiting for {MIN_HOLD_DURATION}s threshold)")
+                    # Note: We don't execute triggers on press, only on release
             else:
                 actions.append(f"Unknown key usage {key}")
 
@@ -556,14 +527,31 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Remove from press times tracking
+                # Calculate hold duration and execute appropriate trigger
                 if keycode in key_press_times:
+                    press_time = key_press_times[keycode]
+                    current_time = time.time()
+                    hold_duration = current_time - press_time
                     del key_press_times[keycode]
-                
-                # Check for trigger match (release event = value 0)
-                command = match_trigger(keycode, 0, current_modifiers)
-                if command:
-                    await execute_trigger_command(command)
+                    
+                    # Check which trigger to execute based on hold duration
+                    if hold_duration >= MIN_HOLD_DURATION:
+                        # Key was held >= 0.5s, execute value 2 trigger
+                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
+                        command = match_trigger(keycode, 2, current_modifiers)
+                        if command:
+                            await execute_trigger_command(command)
+                    else:
+                        # Key was held < 0.5s, execute value 1 trigger
+                        actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
+                        command = match_trigger(keycode, 1, current_modifiers)
+                        if command:
+                            await execute_trigger_command(command)
+                    
+                    # Also check for release trigger (value 0)
+                    command = match_trigger(keycode, 0, current_modifiers)
+                    if command:
+                        await execute_trigger_command(command)
 
     # Mouse report (5 bytes)
     elif len(data) == 5:

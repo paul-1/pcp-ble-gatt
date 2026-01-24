@@ -187,28 +187,34 @@ The trigger configuration file follows the triggerhappy format:
 
 Where:
 - `<event name>`: Key name (e.g., `KEY_PLAYPAUSE`, `KEY_VOLUMEUP`)
-- `<event value>`: Event type
-  - `0` = key release
-  - `1` = key press (initial press)
-  - `2` = key hold/repeat (generated after key is held for 0.5 seconds)
+- `<event value>`: Event type based on how long the key was held before release
+  - `0` = key release (always available after any key release)
+  - `1` = short press (key was held for less than 0.5 seconds)
+  - `2` = long press/hold (key was held for 0.5 seconds or more)
 - `<command line>`: Command to execute when the trigger matches
 
-**Note on hold/repeat events (value 2)**: When a key is held down for at least 0.5 seconds (minimum hold duration), subsequent HID reports will trigger value 2 events. This prevents excessive command execution while still allowing repeat actions for things like volume adjustment. The minimum hold duration ensures commands don't fire on every HID report immediately after the initial press.
+**Note on press duration detection**: The system waits for a complete press-and-release cycle before determining which trigger to execute. When you press a key, it records the press time. When you release the key, it calculates how long the key was held and executes either the value 1 trigger (< 0.5s) or value 2 trigger (>= 0.5s). This means:
+- Value 1 triggers execute on release after a short press
+- Value 2 triggers execute on release after a long press
+- Value 0 triggers execute on any release (optional, for cleanup actions)
+
+**Important**: Unlike some systems where value 2 means "repeat", in this implementation value 2 means "long press". You get ONE trigger execution per key release, not continuous repeats.
 
 Example `triggers.conf`:
 ```
-# Single press actions
+# Short press actions (key held < 0.5s)
 KEY_PLAYPAUSE   1   /usr/local/bin/pcp pause
 
-# Actions that repeat while key is held
-KEY_VOLUMEUP    1   /usr/local/bin/pcp up
-KEY_VOLUMEUP    2   /usr/local/bin/pcp up
-KEY_VOLUMEDOWN  1   /usr/local/bin/pcp down
-KEY_VOLUMEDOWN  2   /usr/local/bin/pcp down
+# Long press actions (key held >= 0.5s)
+KEY_PLAYPAUSE   2   /usr/local/bin/pcp stop
 
-# Single actions
+# Can have both short and long press for same key
 KEY_NEXTSONG    1   /usr/local/bin/pcp next
-KEY_PREVIOUSSONG 1  /usr/local/bin/pcp prev
+KEY_NEXTSONG    2   /usr/local/bin/pcp random
+
+# Simple single action (short press only)
+KEY_VOLUMEUP    1   /usr/local/bin/pcp up
+KEY_VOLUMEDOWN  1   /usr/local/bin/pcp down
 ```
 
 #### Modifier Keys
