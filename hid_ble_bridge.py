@@ -70,19 +70,23 @@ MOD_BITS_TO_EVKEY = {
 
 # Reverse lookup for readable key names (handles aliases safely)
 KEYCODE_TO_NAME = {}
+NAME_TO_KEYCODE = {}  # Reverse lookup for efficiency
 for name, code in e.ecodes.items():
     if not name.startswith("KEY_"):
         continue
     if isinstance(code, int):
         KEYCODE_TO_NAME[code] = name
+        NAME_TO_KEYCODE[name] = code
     elif isinstance(code, list):
         for c in code:
             KEYCODE_TO_NAME[c] = name
+            NAME_TO_KEYCODE[name] = c
 
 # Task management and key tracking
 notification_tasks = []
 key_states = set()
 media_pressed_by_source = {}  # track currently pressed media keys per source
+current_modifiers = set()  # track currently active modifiers for trigger matching
 stop_loop = False
 
 debug = False
@@ -164,6 +168,9 @@ def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
     if not key_name:
         return None
     
+    # Find all matching triggers and select the most specific one
+    matches = []
+    
     for trigger_keys, trigger_value, command in triggers:
         # Check if event value matches
         if trigger_value != value:
@@ -177,21 +184,22 @@ def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
         if main_key != key_name:
             continue
         
-        # Check if all required modifiers are active
+        # Check if all required modifiers are active (use NAME_TO_KEYCODE for efficiency)
         required_modifier_codes = set()
         for mod_name in modifier_keys:
-            # Find the keycode for this modifier name
-            mod_code = None
-            for code, name in KEYCODE_TO_NAME.items():
-                if name == mod_name:
-                    mod_code = code
-                    break
+            mod_code = NAME_TO_KEYCODE.get(mod_name)
             if mod_code is not None:
                 required_modifier_codes.add(mod_code)
         
-        # Check if active modifiers match required modifiers
-        if required_modifier_codes == active_modifiers:
-            return command
+        # Check if required modifiers are a subset of active modifiers
+        # This allows additional modifiers to be pressed (standard triggerhappy behavior)
+        if required_modifier_codes.issubset(active_modifiers):
+            matches.append((len(required_modifier_codes), command))
+    
+    # Return the most specific match (most modifiers)
+    if matches:
+        matches.sort(reverse=True)  # Sort by number of modifiers, descending
+        return matches[0][1]
     
     return None
 
@@ -406,7 +414,7 @@ def key_name(keycode: int) -> str:
 
 
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
-    global key_states, media_pressed_by_source
+    global key_states, media_pressed_by_source, current_modifiers
     actions = []
 
     # Media key report (2 bytes)
@@ -422,7 +430,8 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 actions.append(f"{key_name(keycode)} Pressed")
                 
                 # Check for trigger match (press event = value 1)
-                command = match_trigger(keycode, 1, set())
+                # Use global current_modifiers which are tracked from keyboard reports
+                command = match_trigger(keycode, 1, current_modifiers)
                 if command:
                     await execute_trigger_command(command)
             else:
@@ -434,7 +443,8 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 actions.append(f"{key_name(keycode)} Released")
                 
                 # Check for trigger match (release event = value 0)
-                command = match_trigger(keycode, 0, set())
+                # Use global current_modifiers which are tracked from keyboard reports
+                command = match_trigger(keycode, 0, current_modifiers)
                 if command:
                     await execute_trigger_command(command)
             media_pressed_by_source[source].clear()
@@ -446,12 +456,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         modifiers = data[0]
         pressed_keys = {k for k in data[2:] if k != 0}
 
-        # Track current modifier state
-        active_modifier_codes = set()
+        # Update global modifier state
+        current_modifiers.clear()
         
         for bit, keycode in MOD_BITS_TO_EVKEY.items():
             if modifiers & (1 << bit):
-                active_modifier_codes.add(keycode)
+                current_modifiers.add(keycode)
                 if keycode not in key_states:
                     press(ui_kb, keycode)
                     key_states.add(keycode)
@@ -470,7 +480,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     actions.append(f"{key_name(keycode)} Pressed")
                     
                     # Check for trigger match (press event = value 1)
-                    command = match_trigger(keycode, 1, active_modifier_codes)
+                    command = match_trigger(keycode, 1, current_modifiers)
                     if command:
                         await execute_trigger_command(command)
             else:
@@ -483,7 +493,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 actions.append(f"{key_name(keycode)} Released")
                 
                 # Check for trigger match (release event = value 0)
-                command = match_trigger(keycode, 0, active_modifier_codes)
+                command = match_trigger(keycode, 0, current_modifiers)
                 if command:
                     await execute_trigger_command(command)
 
@@ -539,13 +549,13 @@ async def cleanup(client, tasks):
             printlog(f"Error during disconnect: {e}")
     
     # Clear task list to prevent memory leaks on reconnection
-    global notification_tasks
+    global notification_tasks, key_states, media_pressed_by_source, current_modifiers
     notification_tasks.clear()
     
     # Reset key states to prevent stuck keys after disconnect
-    global key_states, media_pressed_by_source
     key_states.clear()
     media_pressed_by_source.clear()
+    current_modifiers.clear()
 
 
 # ==============================================================================
