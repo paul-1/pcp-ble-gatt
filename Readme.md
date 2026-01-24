@@ -9,7 +9,7 @@ A Python application that bridges Bluetooth Low Energy (BLE) HID devices (keyboa
 - **Key Handling**: Supports standard keyboard keys, modifiers, media keys, and mouse movements/clicks.
 - **Device Preparation**: Automatically handles pairing, bonding, and trust management via `bluetoothctl`.
 - **Robust Reconnection**: Automatically attempts reconnection on disconnection.
-- **Built-in Trigger Support**: Direct command execution on key events without external dependencies. Supports triggerhappy-style configuration with modifier keys.
+- **Built-in Trigger Support**: Direct command execution on key events without external dependencies.
 - **Debug Mode**: Optional verbose logging for troubleshooting.
 
 ---
@@ -37,12 +37,12 @@ Standard library modules used (no additional installation needed):
 - `signal`
 - `argparse`
 - `subprocess`
+- `os`
 
 ### System Dependencies
 
 Ensure the following system packages are available:
-- Bluetooth system (BlueZ)
-- (Optional) triggerhappy for external trigger handling - The application now includes built-in trigger support via the `--triggers` option, making triggerhappy optional.
+- pCP Bluetooth system, installed through the pCP Bluetooth menu on the web interface.
 
 ---
 
@@ -71,7 +71,6 @@ Follow these steps to get the application running on PiCorePlayer:
    - download:
      ```ash
      wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/hid_ble_bridge.py
-     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/start_ble_events.sh
      wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/le_auto_pair.sh
      pcp bu
      ```
@@ -160,13 +159,13 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --debug
 
 ### Additional Options
 - `--scan-timeout <seconds>`: Timeout for device scanning by name (default: 10.0)
-- `--triggers <path>`: Path to triggerhappy-style configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events without requiring the triggerhappy daemon.
+- `--triggers <path>`: Path to trigger configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events.
 
 ---
 
 ### Trigger Configuration
 
-The application now supports direct trigger handling without requiring the separate triggerhappy daemon. This allows key events to directly execute commands.
+The application now supports direct trigger handling. This allows key events to directly execute commands.
 
 **Security Note**: Commands in the trigger configuration file are executed via shell. Only use trigger configuration files from trusted sources, and never allow untrusted users to modify your trigger configuration file.
 
@@ -180,7 +179,7 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --triggers /pat
 
 #### Trigger Configuration Format
 
-The trigger configuration file follows the triggerhappy format:
+The trigger configuration file follows the format:
 ```
 <event name>	<event value>	<command line>
 ```
@@ -226,19 +225,6 @@ KEY_A+KEY_LEFTCTRL          1  /usr/bin/echo "Ctrl+A pressed"
 ```
 
 The application will only trigger the command when all specified modifier keys are pressed together with the main key.
-
----
-
-### Using with triggerhappy (Alternative)
-
-Alternatively, you can use the external `triggerhappy` daemon:
-
--  `start_ble_events.sh`  This script will
-    - Automatically find the required device events
-    - Start triggerhappy in dump mode, printing device inputs to console.
-    - You will need to create your triggerhappy configuration and edit this script to use it. A sample is found: https://github.com/paul-1/pcp-ble-gatt/blob/main/triggerhappy.conf
-
-- Press `Ctrl+C` to stop the application.
 
 ### Finally Set Automatic Start
    
