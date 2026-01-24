@@ -302,8 +302,8 @@ def on_interfaces_added(bus, adapter, path, ifaces, target_address, target_prefi
 def main():
     parser = argparse.ArgumentParser(description='Auto-pair BLE HID by power cycling the adapter, then exit.')
     parser.add_argument('--adapter', default='hci0', help='Adapter name (default: hci0)')
-    parser.add_argument('--address', help='Exact MAC address of target device (disables name matching)')
-    parser.add_argument('--name-prefix', default='HID Remote', help='Device name prefix to match (ignored if --address is set)')
+    parser.add_argument('--device-mac', help='Exact MAC address of target device (disables name matching)')
+    parser.add_argument('--device-name', default='HID Remote', help='Device name prefix to match (default "HID Remote")')
     parser.add_argument('--trust', action='store_true', help='Set Trusted=true after pairing (default: false)')
     args = parser.parse_args()
 
@@ -350,13 +350,13 @@ def main():
     obj_mgr = dbus.Interface(bus.get_object(BUS_NAME, '/'), 'org.freedesktop.DBus.ObjectManager')
     obj_mgr.connect_to_signal('InterfacesAdded',
                               lambda path, ifaces: on_interfaces_added(bus, adapter, path, ifaces,
-                                                                       args.address, None if args.address else args.name_prefix))
+                                                                       args.device_mac, None if args.device_mac else args.device_name))
 
     # If the device is already known, treat it as added
     for path, ifaces in objs.items():
         dev_props = ifaces.get('org.bluez.Device1')
-        if dev_props and device_matches(dev_props, args.address, None if args.address else args.name_prefix):
-            on_interfaces_added(bus, adapter, path, ifaces, args.address, None if args.address else args.name_prefix)
+        if dev_props and device_matches(dev_props, args.device_mac, None if args.device_mac else args.device_name):
+            on_interfaces_added(bus, adapter, path, ifaces, args.device_mac, None if args.device_mac else args.device_name)
 
     print('Starting LE discovery...')
     start_discovery()
