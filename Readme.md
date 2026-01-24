@@ -187,14 +187,26 @@ The trigger configuration file follows the triggerhappy format:
 
 Where:
 - `<event name>`: Key name (e.g., `KEY_PLAYPAUSE`, `KEY_VOLUMEUP`)
-- `<event value>`: Event type - `0` for release, `1` for press, `2` for hold/repeat
+- `<event value>`: Event type
+  - `0` = key release
+  - `1` = key press (initial press)
+  - `2` = key hold/repeat (generated while key is held down)
 - `<command line>`: Command to execute when the trigger matches
+
+**Note on hold/repeat events (value 2)**: When a key is held down, the system will continuously receive HID reports with that key still pressed. Each subsequent report while the key remains pressed will trigger a value 2 event. This allows you to execute commands repeatedly while a key is held, similar to auto-repeat behavior.
 
 Example `triggers.conf`:
 ```
+# Single press actions
 KEY_PLAYPAUSE   1   /usr/local/bin/pcp pause
+
+# Actions that repeat while key is held
 KEY_VOLUMEUP    1   /usr/local/bin/pcp up
+KEY_VOLUMEUP    2   /usr/local/bin/pcp up
 KEY_VOLUMEDOWN  1   /usr/local/bin/pcp down
+KEY_VOLUMEDOWN  2   /usr/local/bin/pcp down
+
+# Single actions
 KEY_NEXTSONG    1   /usr/local/bin/pcp next
 KEY_PREVIOUSSONG 1  /usr/local/bin/pcp prev
 ```

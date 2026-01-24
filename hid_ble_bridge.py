@@ -449,7 +449,14 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 if command:
                     await execute_trigger_command(command)
             else:
-                actions.append(f"{key_name(keycode)} (already pressed)")
+                # Media key is still held down (repeat/hold event)
+                actions.append(f"{key_name(keycode)} Held")
+                
+                # Check for trigger match (hold/repeat event = value 2)
+                # Use global current_modifiers which are tracked from keyboard reports
+                command = match_trigger(keycode, 2, current_modifiers)
+                if command:
+                    await execute_trigger_command(command)
         elif usage == 0:
             to_release = list(media_pressed_by_source[source])
             for keycode in to_release:
@@ -495,6 +502,15 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     
                     # Check for trigger match (press event = value 1)
                     command = match_trigger(keycode, 1, current_modifiers)
+                    if command:
+                        await execute_trigger_command(command)
+                else:
+                    # Key is still held down (repeat/hold event)
+                    # This matches triggerhappy behavior for value 2
+                    actions.append(f"{key_name(keycode)} Held")
+                    
+                    # Check for trigger match (hold/repeat event = value 2)
+                    command = match_trigger(keycode, 2, current_modifiers)
                     if command:
                         await execute_trigger_command(command)
             else:
