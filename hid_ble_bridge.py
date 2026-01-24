@@ -393,6 +393,15 @@ async def cleanup(client, tasks):
             printlog("Disconnect interrupted (EOFError) during shutdown; ignoring.")
         except Exception as e:
             printlog(f"Error during disconnect: {e}")
+    
+    # Clear task list to prevent memory leaks on reconnection
+    global notification_tasks
+    notification_tasks.clear()
+    
+    # Reset key states to prevent stuck keys after disconnect
+    global key_states, media_pressed_by_source
+    key_states.clear()
+    media_pressed_by_source.clear()
 
 
 # ==============================================================================
@@ -435,7 +444,16 @@ async def main():
         return
 
     stop_event = asyncio.Event()
-    client = BleakClient(device_mac)
+    
+    # Define disconnect callback to detect when device disconnects
+    def disconnected_callback(client):
+        try:
+            printlog("Device disconnected. Will attempt to reconnect...")
+            stop_event.set()
+        except Exception as e:
+            printlog(f"Error in disconnect callback: {e}")
+    
+    client = BleakClient(device_mac, disconnected_callback=disconnected_callback)
 
     def handle_sigint(signum, frame):
         global stop_loop
@@ -459,6 +477,7 @@ async def main():
 
     while not stop_loop:
         printlog(f"Connecting to: {device_mac}...")
+        
         try:
             await client.connect()
             printlog(f"Connected to BLE device {device_mac}.")
