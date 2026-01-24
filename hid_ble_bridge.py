@@ -118,12 +118,12 @@ def create_uinput_with_retry(capabilities, name, max_retries=5, initial_delay=0.
         try:
             ui = UInput(capabilities, name=name)
             if attempt > 0:
-                printlog(f"Successfully created {name} after {attempt + 1} attempt(s)")
+                printlog(f"Successfully created {name} after {attempt + 1} attempts")
             return ui
         except OSError as e:
             last_error = e
             if attempt < max_retries - 1:
-                printlog(f"Failed to create {name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+                printlog(f"Failed to create {name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:g}s...")
                 time.sleep(delay)
                 delay = min(delay * 2, max_delay)  # Exponential backoff with cap
             else:
