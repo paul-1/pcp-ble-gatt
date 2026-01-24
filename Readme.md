@@ -58,22 +58,64 @@ Follow these steps to get the application running on PiCorePlayer:
    - Near the bottom of the Bluetooth page, enable the RPi built-in Bluetooth
    - Or install a supported USB Bluetooth stick.
 
-3. **Reboot**:
+3. **Install Required package bleak**
+   - ```ash
+     tce-load -wi python3.11-bleak.tcz
+     ```
+   - If this was already on your system, make sure it is listed in `/etc/sysconfig/tcedir/onboot.lst`
 
-4. **Pair Device**
+4. **Reboot**:
+
+5. **Download Scripts from this Repository**:
+   - download:
+     ```ash
+     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/hid_ble_bridge.py
+     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/start_ble_events.sh
+     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/le_auto_pair.sh
+     pcp bu
+     ```
+
+6. **Pair Device**
    - Open a ssh session to the RPi
+   - Pair with the auto pairing agent.
+     ```ash
+     le_auto_pair.py --device-name "<device name prefix>"
+     ```
+   - Verify Pairing from output
+     ```ash
+     Device info at cleanup:
+       Address: FF:FF:11:5E:88:E2
+       Name: HID Remote01
+       Paired: 1
+       Bonded: 1
+       Connected: 0
+       Trusted: 0
+       LegacyPairing: 0
+       ServicesResolved: 0
+     Agent unregistered
+     Cleanup complete. Exiting.
+     ```
+   - Backup the changes
+     ```ash
+     pcp bu
+     ```
+
+6.1 **Alternate Manual Pairing**  (Not needed if above works)
    - Scan for Bluetooth
-     ```bluetoothctl
+     ```ash
+     bluetoothctl
      scan on
      ```
    - Watch for you device to show up, press a button on remote if needed.
      You will need the hardware address for the device in the format XX:XX:XX:XX:XX:XX
    - Stop scanning and pair
-     ```scan off
+     ```ash
+     scan off
      pair XX:XX:XX:XX:XX:XX
      ```
    - It is important to see this type of output
-     ```Attempting to pair with XX:XX:XX:XX:XX:XX
+     ```ash
+     Attempting to pair with XX:XX:XX:XX:XX:XX
      [CHG] Device XX:XX:XX:XX:XX:XX Connected: yes
      [CHG] LE XX:XX:XX:XX:XX:XX Connected: yes
      [CHG] Device XX:XX:XX:XX:XX:XX Bonded: yes
@@ -82,19 +124,12 @@ Follow these steps to get the application running on PiCorePlayer:
      ```
    - Make sure not to set trusted: yes, if you did then "untrust XX:XX:XX:XX:XX:XX"
    - Exit and Backup
-     ```exit
+     ```ash
+     exit
      pcp bu
         [ INFO ] Copying existing backup to /mnt/mmcblk0p2/tce/mydatabk.[tgz|tgz.bfe] .. Done.
         Backing up files to /mnt/mmcblk0p2/tce/mydata.tgz Done.
         [ OK ] Backup successful.
-     ```
-
-5. **Download Scripts from this Repository**:
-   - download:
-     ```ash
-     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/hid_ble_bridge.py
-     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/start_ble_events.sh
-     pcp bu
      ```
 
 ---
