@@ -248,8 +248,10 @@ async def handle_key_release_triggers(keycode: int, press_times: dict, active_mo
         actions: List to append action descriptions to
     
     Returns:
-        None (modifies press_times dict and actions list in place)
+        List of commands to execute (returned to allow logging after main HID report log)
     """
+    commands_to_execute = []
+    
     if keycode in press_times:
         press_time = press_times[keycode]
         current_time = time.time()
@@ -260,20 +262,19 @@ async def handle_key_release_triggers(keycode: int, press_times: dict, active_mo
         if hold_duration >= MIN_HOLD_DURATION:
             # Key was held >= 0.5s, execute value 2 trigger
             actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 2)")
-            command = match_trigger(keycode, 2, active_modifiers)
-            if command:
-                await execute_trigger_command(command)
+            if command := match_trigger(keycode, 2, active_modifiers):
+                commands_to_execute.append(command)
         else:
             # Key was held < 0.5s, execute value 1 trigger
             actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
-            command = match_trigger(keycode, 1, active_modifiers)
-            if command:
-                await execute_trigger_command(command)
+            if command := match_trigger(keycode, 1, active_modifiers):
+                commands_to_execute.append(command)
         
         # Also check for release trigger (value 0)
-        command = match_trigger(keycode, 0, active_modifiers)
-        if command:
-            await execute_trigger_command(command)
+        if command := match_trigger(keycode, 0, active_modifiers):
+            commands_to_execute.append(command)
+    
+    return commands_to_execute
 
 # ==============================================================================
 # UInput device creation with retry logic
@@ -473,6 +474,7 @@ def key_name(keycode: int) -> str:
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
     global key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
     actions = []
+    commands_to_execute = []
 
     # Media key report (2 bytes)
     if len(data) == 2:
@@ -495,8 +497,9 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Handle trigger execution based on hold duration
-                await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
+                # Collect commands to execute after logging
+                cmds = await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
+                commands_to_execute.extend(cmds)
                 
             media_pressed_by_source[source].clear()
         else:
@@ -542,8 +545,9 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Handle trigger execution based on hold duration
-                await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
+                # Collect commands to execute after logging
+                cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
+                commands_to_execute.extend(cmds)
 
     # Mouse report (5 bytes)
     elif len(data) == 5:
@@ -559,6 +563,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 
     action_str = "; ".join(actions) if actions else "No mapped actions"
     printlog(f"[{source}] Decoding HID report: {data.hex()}  {action_str}")
+    
+    # Execute commands AFTER logging, so logs appear in correct order
+    for command in commands_to_execute:
+        await execute_trigger_command(command)
 
 
 async def notification_handler(client: BleakClient, handle: int, ui_kb: UInput, ui_mouse: UInput):
