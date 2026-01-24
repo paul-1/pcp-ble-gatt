@@ -108,12 +108,10 @@ def parse_triggers_file(filepath: str) -> list:
     
     Returns list of tuples: (event_keys, event_value, command)
     where event_keys is a list of key names (first is main key, rest are modifiers)
+    
+    Note: Caller should verify file exists before calling this function.
     """
     parsed_triggers = []
-    
-    if not os.path.isfile(filepath):
-        printlog(f"Trigger file not found: {filepath}")
-        return parsed_triggers
     
     try:
         with open(filepath, 'r') as f:
@@ -142,7 +140,9 @@ def parse_triggers_file(filepath: str) -> list:
                 event_keys = event_name.split('+')
                 
                 parsed_triggers.append((event_keys, event_value, command))
-                printlog(f"Loaded trigger: {event_keys} = {event_value} -> {command}")
+                # Log only first 50 chars of command to avoid exposing sensitive data
+                safe_command = command[:50] + "..." if len(command) > 50 else command
+                printlog(f"Loaded trigger: {event_keys} = {event_value} -> {safe_command}")
     
     except Exception as e:
         printlog(f"Error reading trigger file {filepath}: {e}")
@@ -190,6 +190,9 @@ def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
             mod_code = NAME_TO_KEYCODE.get(mod_name)
             if mod_code is not None:
                 required_modifier_codes.add(mod_code)
+            else:
+                # Log warning for unknown modifier names
+                printlog(f"Warning: Unknown modifier key name '{mod_name}' in trigger configuration")
         
         # Check if required modifiers are a subset of active modifiers
         # This allows additional modifiers to be pressed (standard triggerhappy behavior)
@@ -206,17 +209,23 @@ def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
 async def execute_trigger_command(command: str):
     """
     Execute a trigger command asynchronously in the background.
+    Uses shell execution for compatibility with triggerhappy behavior.
+    WARNING: Commands are executed via shell - only use trusted configuration files.
     """
     try:
         # Run command in background without waiting for completion
+        # Note: Using shell=True for compatibility with triggerhappy format
+        # Users should only use trusted trigger configuration files
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL
         )
-        printlog(f"Executed trigger: {command}")
+        # Log only the first 50 characters to avoid exposing sensitive data
+        safe_command = command[:50] + "..." if len(command) > 50 else command
+        printlog(f"Executed trigger: {safe_command}")
     except Exception as e:
-        printlog(f"Error executing trigger command '{command}': {e}")
+        printlog(f"Error executing trigger command: {e}")
 
 # ==============================================================================
 # UInput device creation with retry logic

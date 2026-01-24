@@ -168,6 +168,8 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --debug
 
 The application now supports direct trigger handling without requiring the separate triggerhappy daemon. This allows key events to directly execute commands.
 
+**Security Note**: Commands in the trigger configuration file are executed via shell. Only use trigger configuration files from trusted sources, and never allow untrusted users to modify your trigger configuration file.
+
 #### Enabling Trigger Support
 
 Use the `--triggers` option to specify a configuration file:
