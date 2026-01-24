@@ -33,7 +33,7 @@ while [ 1 ]; do
 	echo "Starting Triggerhappy"
 	##### This is just a dump line, once working remove this and use the trigger file
 	sudo thd --dump $KEYBOARD $MOUSE
-	#sudo thd --triggers /home/tc/triggerhappy.conf $KEYBOARD $MOUSE
+	#sudo thd --triggers /home/tc/triggers.conf $KEYBOARD $MOUSE
 
 	sleep 5
 done
