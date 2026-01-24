@@ -393,6 +393,14 @@ async def cleanup(client, tasks):
             printlog("Disconnect interrupted (EOFError) during shutdown; ignoring.")
         except Exception as e:
             printlog(f"Error during disconnect: {e}")
+    
+    # Clear task list to prevent memory leaks on reconnection
+    tasks.clear()
+    
+    # Reset key states to prevent stuck keys after disconnect
+    global key_states, media_pressed_by_source
+    key_states.clear()
+    media_pressed_by_source.clear()
 
 
 # ==============================================================================
@@ -459,6 +467,14 @@ async def main():
 
     while not stop_loop:
         printlog(f"Connecting to: {device_mac}...")
+        
+        # Set up disconnect callback to detect when device disconnects
+        def disconnected_callback(client):
+            printlog("Device disconnected. Will attempt to reconnect...")
+            stop_event.set()
+        
+        client.set_disconnected_callback(disconnected_callback)
+        
         try:
             await client.connect()
             printlog(f"Connected to BLE device {device_mac}.")
