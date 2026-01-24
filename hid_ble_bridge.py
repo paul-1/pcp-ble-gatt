@@ -10,6 +10,7 @@ import asyncio
 import signal
 import argparse
 import subprocess
+import time
 from bleak import BleakClient, BleakScanner
 from evdev import UInput, ecodes as e
 from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
@@ -88,6 +89,48 @@ def printlog(data):
     global debug
     if debug:
         print(data)
+
+# ==============================================================================
+# UInput device creation with retry logic
+# ==============================================================================
+
+def create_uinput_with_retry(capabilities, name, max_retries=5, initial_delay=0.5, max_delay=5.0):
+    """
+    Create a UInput device with retry logic to handle transient device errors.
+    
+    Args:
+        capabilities: Device capabilities dict
+        name: Device name string
+        max_retries: Maximum number of retry attempts (default: 5)
+        initial_delay: Initial delay between retries in seconds (default: 0.5)
+        max_delay: Maximum delay between retries in seconds (default: 5.0)
+    
+    Returns:
+        UInput device instance
+    
+    Raises:
+        OSError: If all retry attempts fail
+    """
+    delay = initial_delay
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            ui = UInput(capabilities, name=name)
+            if attempt > 0:
+                printlog(f"Successfully created {name} after {attempt + 1} attempts")
+            return ui
+        except OSError as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                printlog(f"Failed to create {name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:g}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, max_delay)  # Exponential backoff with cap
+            else:
+                printlog(f"Failed to create {name} after {max_retries} attempts")
+    
+    # If we get here, all retries failed
+    raise last_error
 
 # ==============================================================================
 # bluetoothctl helper functions for device preparation
@@ -407,8 +450,9 @@ async def main():
 
     kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values())}
     mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
-    ui_kb = UInput(kb_capabilities, name="pCP BLE HID Keyboard")
-    ui_mouse = UInput(mouse_capabilities, name="pCP BLE HID Mouse")
+    
+    ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
+    ui_mouse = create_uinput_with_retry(mouse_capabilities, "pCP BLE HID Mouse")
 
     printlog(f"Virtual keyboard created: {ui_kb.device}")
     printlog(f"Virtual mouse created: {ui_mouse.device}")
