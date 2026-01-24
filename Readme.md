@@ -9,6 +9,7 @@ A Python application that bridges Bluetooth Low Energy (BLE) HID devices (keyboa
 - **Key Handling**: Supports standard keyboard keys, modifiers, media keys, and mouse movements/clicks.
 - **Device Preparation**: Automatically handles pairing, bonding, and trust management via `bluetoothctl`.
 - **Robust Reconnection**: Automatically attempts reconnection on disconnection.
+- **Built-in Trigger Support**: Direct command execution on key events without external dependencies. Supports triggerhappy-style configuration with modifier keys.
 - **Debug Mode**: Optional verbose logging for troubleshooting.
 
 ---
@@ -40,8 +41,8 @@ Standard library modules used (no additional installation needed):
 ### System Dependencies
 
 Ensure the following system packages are available:
-- Bluetooth system:
-- triggerhappy or some other handling for input events.
+- Bluetooth system (BlueZ)
+- (Optional) triggerhappy for external trigger handling - The application now includes built-in trigger support via the `--triggers` option, making triggerhappy optional.
 
 ---
 
@@ -159,13 +160,65 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --debug
 
 ### Additional Options
 - `--scan-timeout <seconds>`: Timeout for device scanning by name (default: 10.0)
+- `--triggers <path>`: Path to triggerhappy-style configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events without requiring the triggerhappy daemon.
 
-- Press `Ctrl+C` to stop the application.
+---
+
+### Trigger Configuration
+
+The application now supports direct trigger handling without requiring the separate triggerhappy daemon. This allows key events to directly execute commands.
+
+#### Enabling Trigger Support
+
+Use the `--triggers` option to specify a configuration file:
+
+```ash
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --triggers /path/to/triggers.conf
+```
+
+#### Trigger Configuration Format
+
+The trigger configuration file follows the triggerhappy format:
+```
+<event name>	<event value>	<command line>
+```
+
+Where:
+- `<event name>`: Key name (e.g., `KEY_PLAYPAUSE`, `KEY_VOLUMEUP`)
+- `<event value>`: Event type - `0` for release, `1` for press, `2` for hold/repeat
+- `<command line>`: Command to execute when the trigger matches
+
+Example `triggers.conf`:
+```
+KEY_PLAYPAUSE   1   /usr/local/bin/pcp pause
+KEY_VOLUMEUP    1   /usr/local/bin/pcp up
+KEY_VOLUMEDOWN  1   /usr/local/bin/pcp down
+KEY_NEXTSONG    1   /usr/local/bin/pcp next
+KEY_PREVIOUSSONG 1  /usr/local/bin/pcp prev
+```
+
+#### Modifier Keys
+
+You can also specify modifier keys by appending them with `+`:
+```
+KEY_VOLUMEUP+KEY_LEFTSHIFT  1  /usr/local/bin/pcp up_big
+KEY_A+KEY_LEFTCTRL          1  /usr/bin/echo "Ctrl+A pressed"
+```
+
+The application will only trigger the command when all specified modifier keys are pressed together with the main key.
+
+---
+
+### Using with triggerhappy (Alternative)
+
+Alternatively, you can use the external `triggerhappy` daemon:
 
 -  `start_ble_events.sh`  This script will
     - Automatically find the required device events
     - Start triggerhappy in dump mode, printing device inputs to console.
     - You will need to create your triggerhappy configuration and edit this script to use it. A sample is found: https://github.com/paul-1/pcp-ble-gatt/blob/main/triggerhappy.conf
+
+- Press `Ctrl+C` to stop the application.
 
 ### Finally Set Automatic Start
    
