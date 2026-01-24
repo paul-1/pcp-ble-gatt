@@ -443,7 +443,13 @@ async def main():
         return
 
     stop_event = asyncio.Event()
-    client = BleakClient(device_mac)
+    
+    # Define disconnect callback to detect when device disconnects
+    def disconnected_callback(client):
+        printlog("Device disconnected. Will attempt to reconnect...")
+        stop_event.set()
+    
+    client = BleakClient(device_mac, disconnected_callback=disconnected_callback)
 
     def handle_sigint(signum, frame):
         global stop_loop
@@ -467,13 +473,6 @@ async def main():
 
     while not stop_loop:
         printlog(f"Connecting to: {device_mac}...")
-        
-        # Set up disconnect callback to detect when device disconnects
-        def disconnected_callback(client):
-            printlog("Device disconnected. Will attempt to reconnect...")
-            stop_event.set()
-        
-        client.set_disconnected_callback(disconnected_callback)
         
         try:
             await client.connect()
