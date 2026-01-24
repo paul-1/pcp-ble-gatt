@@ -11,6 +11,7 @@ import signal
 import argparse
 import subprocess
 import time
+import os
 from bleak import BleakClient, BleakScanner
 from evdev import UInput, ecodes as e
 from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
@@ -89,6 +90,125 @@ def printlog(data):
     global debug
     if debug:
         print(data)
+
+# ==============================================================================
+# Trigger configuration handling
+# ==============================================================================
+
+triggers = []  # List of (event_keys, event_value, command) tuples
+
+def parse_triggers_file(filepath: str) -> list:
+    """
+    Parse triggerhappy-style configuration file.
+    Format: <event name>	<event value>	<command line>
+    
+    Returns list of tuples: (event_keys, event_value, command)
+    where event_keys is a list of key names (first is main key, rest are modifiers)
+    """
+    parsed_triggers = []
+    
+    if not os.path.isfile(filepath):
+        printlog(f"Trigger file not found: {filepath}")
+        return parsed_triggers
+    
+    try:
+        with open(filepath, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Split on whitespace, limiting to 3 parts
+                parts = line.split(None, 2)
+                if len(parts) < 3:
+                    printlog(f"Warning: Invalid trigger line {line_num}: {line}")
+                    continue
+                
+                event_name, event_value_str, command = parts
+                
+                # Parse event value
+                try:
+                    event_value = int(event_value_str)
+                except ValueError:
+                    printlog(f"Warning: Invalid event value on line {line_num}: {event_value_str}")
+                    continue
+                
+                # Parse event name (may include modifiers with +)
+                event_keys = event_name.split('+')
+                
+                parsed_triggers.append((event_keys, event_value, command))
+                printlog(f"Loaded trigger: {event_keys} = {event_value} -> {command}")
+    
+    except Exception as e:
+        printlog(f"Error reading trigger file {filepath}: {e}")
+    
+    return parsed_triggers
+
+def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
+    """
+    Check if a key event matches any configured trigger.
+    
+    Args:
+        keycode: The evdev keycode that was pressed/released
+        value: Event value (0=release, 1=press, 2=hold/repeat)
+        active_modifiers: Set of currently active modifier keycodes
+    
+    Returns:
+        Command string to execute, or None if no match
+    """
+    global triggers
+    
+    # Get the key name for the keycode
+    key_name = KEYCODE_TO_NAME.get(keycode)
+    if not key_name:
+        return None
+    
+    for trigger_keys, trigger_value, command in triggers:
+        # Check if event value matches
+        if trigger_value != value:
+            continue
+        
+        # First key in trigger_keys is the main key
+        main_key = trigger_keys[0]
+        modifier_keys = set(trigger_keys[1:])
+        
+        # Check if main key matches
+        if main_key != key_name:
+            continue
+        
+        # Check if all required modifiers are active
+        required_modifier_codes = set()
+        for mod_name in modifier_keys:
+            # Find the keycode for this modifier name
+            mod_code = None
+            for code, name in KEYCODE_TO_NAME.items():
+                if name == mod_name:
+                    mod_code = code
+                    break
+            if mod_code is not None:
+                required_modifier_codes.add(mod_code)
+        
+        # Check if active modifiers match required modifiers
+        if required_modifier_codes == active_modifiers:
+            return command
+    
+    return None
+
+async def execute_trigger_command(command: str):
+    """
+    Execute a trigger command asynchronously in the background.
+    """
+    try:
+        # Run command in background without waiting for completion
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        printlog(f"Executed trigger: {command}")
+    except Exception as e:
+        printlog(f"Error executing trigger command '{command}': {e}")
 
 # ==============================================================================
 # UInput device creation with retry logic
@@ -300,6 +420,11 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 press(ui_kb, keycode)
                 media_pressed_by_source[source].add(keycode)
                 actions.append(f"{key_name(keycode)} Pressed")
+                
+                # Check for trigger match (press event = value 1)
+                command = match_trigger(keycode, 1, set())
+                if command:
+                    await execute_trigger_command(command)
             else:
                 actions.append(f"{key_name(keycode)} (already pressed)")
         elif usage == 0:
@@ -307,6 +432,11 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
             for keycode in to_release:
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
+                
+                # Check for trigger match (release event = value 0)
+                command = match_trigger(keycode, 0, set())
+                if command:
+                    await execute_trigger_command(command)
             media_pressed_by_source[source].clear()
         else:
             actions.append(f"Unknown media usage {usage}")
@@ -316,8 +446,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         modifiers = data[0]
         pressed_keys = {k for k in data[2:] if k != 0}
 
+        # Track current modifier state
+        active_modifier_codes = set()
+        
         for bit, keycode in MOD_BITS_TO_EVKEY.items():
             if modifiers & (1 << bit):
+                active_modifier_codes.add(keycode)
                 if keycode not in key_states:
                     press(ui_kb, keycode)
                     key_states.add(keycode)
@@ -334,6 +468,11 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     press(ui_kb, keycode)
                     key_states.add(keycode)
                     actions.append(f"{key_name(keycode)} Pressed")
+                    
+                    # Check for trigger match (press event = value 1)
+                    command = match_trigger(keycode, 1, active_modifier_codes)
+                    if command:
+                        await execute_trigger_command(command)
             else:
                 actions.append(f"Unknown key usage {key}")
 
@@ -342,6 +481,11 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 release(ui_kb, keycode)
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
+                
+                # Check for trigger match (release event = value 0)
+                command = match_trigger(keycode, 0, active_modifier_codes)
+                if command:
+                    await execute_trigger_command(command)
 
     # Mouse report (5 bytes)
     elif len(data) == 5:
@@ -415,12 +559,22 @@ async def main():
     group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
     parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
     parser.add_argument("--debug", action="store_true", help="Enable messages on console")
+    parser.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
     args = parser.parse_args()
 
-    global stop_loop, debug
+    global stop_loop, debug, triggers
 
     if args.debug:
         debug = True
+
+    # Load trigger configuration if specified
+    if args.triggers:
+        if os.path.isfile(args.triggers):
+            triggers = parse_triggers_file(args.triggers)
+            printlog(f"Loaded {len(triggers)} trigger(s) from {args.triggers}")
+        else:
+            printlog(f"Warning: Trigger file not found: {args.triggers}")
+            printlog("Continuing without trigger handling...")
 
     while True:
         info = get_controller_power()
