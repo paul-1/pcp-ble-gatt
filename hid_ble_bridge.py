@@ -395,7 +395,8 @@ async def cleanup(client, tasks):
             printlog(f"Error during disconnect: {e}")
     
     # Clear task list to prevent memory leaks on reconnection
-    tasks.clear()
+    global notification_tasks
+    notification_tasks.clear()
     
     # Reset key states to prevent stuck keys after disconnect
     global key_states, media_pressed_by_source
@@ -446,8 +447,11 @@ async def main():
     
     # Define disconnect callback to detect when device disconnects
     def disconnected_callback(client):
-        printlog("Device disconnected. Will attempt to reconnect...")
-        stop_event.set()
+        try:
+            printlog("Device disconnected. Will attempt to reconnect...")
+            stop_event.set()
+        except Exception as e:
+            printlog(f"Error in disconnect callback: {e}")
     
     client = BleakClient(device_mac, disconnected_callback=disconnected_callback)
 
