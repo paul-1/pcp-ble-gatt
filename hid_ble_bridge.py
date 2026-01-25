@@ -559,38 +559,32 @@ def determine_report_type(usage_pairs: set) -> str:
 def resolve_report_definition(data: bytes):
     """
     Resolve report ID + payload based on report definitions.
-    Handles devices that omit report IDs by matching payload length.
+    For devices where report IDs are not included in the data, match by payload length.
     Returns: (report_id, definition, payload, id_included, resolve_reason)
     """
     if not report_definitions:
         return None
 
-    # Case 1: Report ID is included in data
-    if data and data[0] in report_definitions:
-        definition = report_definitions[data[0]]
-        size_bytes = definition["size_bytes"]
-        if len(data) - 1 >= size_bytes:
-            return data[0], definition, data[1:1 + size_bytes], True, "id"
-
-    # Case 2: No report ID in data, match by payload size
+    # Match by payload length only (report ID is NOT in the data)
     matches = []
     for rid, definition in report_definitions.items():
-        if len(data) == definition["size_bytes"]:
+        if len(data) == definition.get("size_bytes", -1):
             matches.append((rid, definition))
 
+    # Debug log
     known_sizes = ", ".join(f"{rid}:{d['size_bytes']}" for rid, d in report_definitions.items())
     printlog(
         f"resolve_report_definition: len={len(data)} "
         f"known_sizes={{{known_sizes}}} "
         f"matches={[rid for rid, _ in matches]}"
     )
-    
+
     if len(matches) == 1:
         rid, definition = matches[0]
         return rid, definition, data, False, "length"
 
     return None
-
+    
 # ==============================================================================
 # HID handling functions with enhanced logging
 # ==============================================================================
