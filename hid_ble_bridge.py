@@ -18,7 +18,8 @@ from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
 
 # BLE UUIDs for HID Service and Characteristics
 UUID_HID_SERVICE = "00001812-0000-1000-8000-00805f9b34fb"  # HID Service
-UUID_HID_REPORT = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
+UUID_HID_REPORT_MAP = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
+UUID_HID_REPORT = UUID_HID_REPORT_MAP  # UUID_HID_REPORT = UUID_HID_REPORT_MAP
 
 # Key Mappings for HID Usages
 USAGE_TO_EVKEY = {
@@ -476,9 +477,28 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     actions = []
     commands_to_execute = []
 
-    # Media key report (2 bytes)
-    if len(data) == 2:
-        usage = int.from_bytes(data, "little")
+    # Media key report (2, 3, or 4 bytes - variable length consumer/media reports)
+    if len(data) in (2, 3, 4):
+        # Decode as little-endian, handling variable length with strict zero-padding validation
+        # Pad with zeros to 4 bytes for consistent decoding
+        padded_data = data + b'\x00' * (4 - len(data))
+        usage = int.from_bytes(padded_data[:4], "little")
+        
+        # Validate that padding bytes (if any) are zero
+        # For 2-byte reports: data[2:] should be empty
+        # For 3-byte reports: check data[3] if exists beyond usage bits
+        # For 4-byte reports: check data[4:] if exists beyond usage bits
+        has_unexpected_bytes = False
+        if len(data) > 2:
+            # Check if extra bytes beyond the first 2 are non-zero (when usage fits in 2 bytes)
+            # Most consumer usages are 16-bit, so bytes beyond that should be zero
+            extra_bytes = data[2:]
+            if any(b != 0 for b in extra_bytes):
+                # Only log if the usage itself fits in 2 bytes (< 0x10000)
+                if usage < 0x10000:
+                    has_unexpected_bytes = True
+                    printlog(f"[{source}] Unexpected non-zero padding in {len(data)}-byte media report: {data.hex()} (usage=0x{usage:04X}, extra bytes={extra_bytes.hex()})")
+        
         media_pressed_by_source.setdefault(source, set())
 
         if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
@@ -503,7 +523,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 
             media_pressed_by_source[source].clear()
         else:
-            actions.append(f"Unknown media usage {usage}")
+            actions.append(f"Unknown media usage 0x{usage:04X}")
+            if not has_unexpected_bytes:
+                # Only log unknown usage if we haven't already logged unexpected bytes
+                printlog(f"[{source}] Unknown media usage in {len(data)}-byte report: {data.hex()} (usage=0x{usage:04X})")
 
     # Keyboard report (8 bytes)
     elif len(data) == 8:
@@ -559,6 +582,8 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         actions.append(f"Mouse buttons={buttons:02x} x={x_mov} y={y_mov} scroll={scroll}")
 
     else:
+        # Log unexpected report lengths with explicit details
+        printlog(f"[{source}] Unsupported HID report length: {len(data)} bytes, data={data.hex()}")
         actions.append(f"Unsupported HID report length {len(data)}")
 
     action_str = "; ".join(actions) if actions else "No mapped actions"
