@@ -111,6 +111,10 @@ report_ids_present = False  # set True if Report Map declares any Report IDs
 # Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
 MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
 
+observed_mouse_lengths = {}  # source → set of seen mouse payload lengths
+MOUSE_MIN_MOVEMENT_THRESHOLD = 2  # ignore tiny/noise reports for length detection
+MIN_SAMPLES_FOR_CONFIDENCE = 3    # how many consistent lengths before locking in
+
 debug = False
 def printlog(data):
     global debug
@@ -667,115 +671,176 @@ def key_name(keycode: int) -> str:
     return KEYCODE_TO_NAME.get(keycode, f"KEY_{keycode}")
 
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
-    global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers, key_press_times, media_press_times, system_press_times
+    global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers
+    global key_press_times, media_press_times, system_press_times
+    global observed_mouse_lengths
+
     actions = []
     commands_to_execute = []
-
     report_id = None
     report_type = None
     payload = data
     id_included = False
     resolve_reason = "none"
 
+    # Try to resolve using report map / descriptor parser
     resolved = resolve_report_definition(data)
     if resolved:
         report_id, definition, payload, id_included, resolve_reason = resolved
         report_type = definition["type"]
 
-    # Fallback heuristics if report map is unavailable or ambiguous
+    # Fallback heuristics if descriptor didn't resolve or is missing
     if report_type is None:
-        if len(data) in (2, 3):
+        data_len = len(data)
+        if data_len in (2, 3):
             report_type = "consumer"
-        elif len(data) == 5:
-            report_type = "mouse"
-        elif len(data) == 8:
+        elif data_len in (8, 9):           # common keyboard sizes (8 + reserved/padding)
             report_type = "keyboard"
-        elif len(data) == 1:
+        elif data_len == 1:
             report_type = "system"
+        elif data_len in (4, 5, 6, 7):     # mouse common sizes
+            report_type = "mouse"
         else:
             report_type = "unknown"
 
-    # Consumer control report (2 bytes payload)
-    if report_type == "consumer":
+    # ───────────────────────────────────────────────────────────────
+    # Mouse report – dynamic length + standard field parsing
+    # ───────────────────────────────────────────────────────────────
+    if report_type == "mouse":
+        current_len = len(payload)
+
+        # Track observed lengths — only from meaningful movements
+        observed_mouse_lengths.setdefault(source, set())
+
+        # Extract movement early to decide if we should record this length
+        x = 0
+        y = 0
+        if current_len >= 3:
+            x = int.from_bytes(payload[1:3], "little", signed=True)  # usually byte 1
+        if current_len >= 4:
+            y = int.from_bytes(payload[2:4], "little", signed=True)  # usually byte 2
+
+        meaningful_movement = abs(x) >= MOUSE_MIN_MOVEMENT_THRESHOLD or abs(y) >= MOUSE_MIN_MOVEMENT_THRESHOLD
+        if meaningful_movement:
+            observed_mouse_lengths[source].add(current_len)
+
+        # Decide effective length for this report
+        seen_lengths = observed_mouse_lengths[source]
+        if len(seen_lengths) == 1 and min(seen_lengths) >= 4:
+            # Only one consistent length observed → trust it
+            effective_len = next(iter(seen_lengths))
+        elif len(seen_lengths) >= MIN_SAMPLES_FOR_CONFIDENCE:
+            # Multiple observations → most common (handles occasional outliers)
+            from collections import Counter
+            count = Counter(seen_lengths)
+            effective_len = count.most_common(1)[0][0]
+        else:
+            # Not confident yet → prefer observed if reasonable, else common fallback
+            effective_len = current_len if current_len in (4, 5, 6) else 5
+
+        # Parse fields using standard layout (descriptor-based offsets)
+        buttons = payload[0] if effective_len >= 1 else 0
+
+        x_mov = int.from_bytes(payload[1:2], "little", signed=True) if effective_len >= 2 else 0
+        y_mov = int.from_bytes(payload[2:3], "little", signed=True) if effective_len >= 3 else 0
+        scroll = int.from_bytes(payload[3:4], "little", signed=True) if effective_len >= 4 else 0
+
+        # If effective_len > 4 → extra bytes are padding/reserved → ignore
+
+        inject_mouse_event(ui_mouse, buttons, x_mov, y_mov, scroll)
+
+        actions.append(
+            f"Mouse (effective {effective_len}B) btn={buttons:02x} "
+            f"x={x_mov:+3} y={y_mov:+3} wheel={scroll:+2} "
+            f"(seen: {sorted(seen_lengths)})"
+        )
+
+    # ───────────────────────────────────────────────────────────────
+    # Consumer / Media keys (2-byte usage usually)
+    # ───────────────────────────────────────────────────────────────
+    elif report_type == "consumer":
         if len(payload) >= 2:
             usage = int.from_bytes(payload[:2], "little")
-        else:
-            usage = 0
-        media_pressed_by_source.setdefault(source, set())
+            media_pressed_by_source.setdefault(source, set())
 
-        if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
-            keycode = MEDIA_USAGE_TO_EVKEY[usage]
-            current_time = time.time()
-            
-            if keycode not in media_pressed_by_source[source]:
-                press(ui_kb, keycode)
-                media_pressed_by_source[source].add(keycode)
-                media_press_times[keycode] = current_time
-                actions.append(f"{key_name(keycode)} Pressed")
-        elif usage == 0:
-            to_release = list(media_pressed_by_source[source])
-            for keycode in to_release:
-                release(ui_kb, keycode)
-                actions.append(f"{key_name(keycode)} Released")
-                
-                cmds = await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
-                commands_to_execute.extend(cmds)
-                
-            media_pressed_by_source[source].clear()
-        else:
-            actions.append(f"Unknown media usage {usage}")
-
-    # Keyboard report (8 bytes payload)
-    elif report_type == "keyboard":
-        modifiers = payload[0] if len(payload) >= 1 else 0
-        pressed_keys = {k for k in payload[2:] if k != 0} if len(payload) >= 2 else set()
-
-        current_modifiers.clear()
-        
-        for bit, keycode in MOD_BITS_TO_EVKEY.items():
-            if modifiers & (1 << bit):
-                current_modifiers.add(keycode)
-                if keycode not in key_states:
-                    press(ui_kb, keycode)
-                    key_states.add(keycode)
-                    actions.append(f"{key_name(keycode)} Pressed")
-            elif keycode in key_states:
-                release(ui_kb, keycode)
-                key_states.remove(keycode)
-                actions.append(f"{key_name(keycode)} Released")
-
-        for key in pressed_keys:
-            keycode = USAGE_TO_EVKEY.get(key)
-            if keycode:
+            if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
+                keycode = MEDIA_USAGE_TO_EVKEY[usage]
                 current_time = time.time()
-                
-                if keycode not in key_states:
+
+                if keycode not in media_pressed_by_source[source]:
                     press(ui_kb, keycode)
-                    key_states.add(keycode)
-                    key_press_times[keycode] = current_time
+                    media_pressed_by_source[source].add(keycode)
+                    media_press_times[keycode] = current_time
                     actions.append(f"{key_name(keycode)} Pressed")
+
+            elif usage == 0:
+                to_release = list(media_pressed_by_source[source])
+                for keycode in to_release:
+                    release(ui_kb, keycode)
+                    actions.append(f"{key_name(keycode)} Released")
+
+                    cmds = await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
+                    commands_to_execute.extend(cmds)
+
+                media_pressed_by_source[source].clear()
+
             else:
-                actions.append(f"Unknown key usage {key}")
+                actions.append(f"Unknown media usage 0x{usage:04x}")
+        else:
+            actions.append("Consumer report too short")
 
-        for keycode in list(key_states):
-            if keycode in USAGE_TO_EVKEY.values() and keycode not in {USAGE_TO_EVKEY.get(k) for k in pressed_keys}:
-                release(ui_kb, keycode)
-                key_states.remove(keycode)
-                actions.append(f"{key_name(keycode)} Released")
-                
-                cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
-                commands_to_execute.extend(cmds)
+    # ───────────────────────────────────────────────────────────────
+    # Keyboard report (usually 8 bytes, sometimes 9 with reserved)
+    # ───────────────────────────────────────────────────────────────
+    elif report_type == "keyboard":
+        if len(payload) >= 8:
+            modifiers = payload[0]
+            # payload[1] usually reserved/0 — ignore
+            pressed_keys = {k for k in payload[2:8] if k != 0}
 
-    # Mouse report (buttons + X + Y + optional wheel)
-    elif report_type == "mouse":
-        buttons = payload[0] if len(payload) >= 1 else 0
-        x_mov = int.from_bytes(payload[1:2], byteorder="little", signed=True) if len(payload) >= 2 else 0
-        y_mov = int.from_bytes(payload[2:3], byteorder="little", signed=True) if len(payload) >= 3 else 0
-        scroll = int.from_bytes(payload[3:4], byteorder="little", signed=True) if len(payload) >= 4 else 0
-        inject_mouse_event(ui_mouse, buttons, x_mov, y_mov, scroll)
-        actions.append(f"Mouse buttons={buttons:02x} x={x_mov} y={y_mov} scroll={scroll}")
+            current_modifiers.clear()
 
-    # System control report (bitfield)
+            # Handle modifiers
+            for bit, keycode in MOD_BITS_TO_EVKEY.items():
+                if modifiers & (1 << bit):
+                    current_modifiers.add(keycode)
+                    if keycode not in key_states:
+                        press(ui_kb, keycode)
+                        key_states.add(keycode)
+                        actions.append(f"{key_name(keycode)} Pressed")
+                elif keycode in key_states:
+                    release(ui_kb, keycode)
+                    key_states.remove(keycode)
+                    actions.append(f"{key_name(keycode)} Released")
+
+            # Handle normal keys
+            for key in pressed_keys:
+                keycode = USAGE_TO_EVKEY.get(key)
+                if keycode:
+                    current_time = time.time()
+                    if keycode not in key_states:
+                        press(ui_kb, keycode)
+                        key_states.add(keycode)
+                        key_press_times[keycode] = current_time
+                        actions.append(f"{key_name(keycode)} Pressed")
+                else:
+                    actions.append(f"Unknown key usage 0x{key:02x}")
+
+            # Release keys no longer pressed
+            for keycode in list(key_states):
+                if keycode in USAGE_TO_EVKEY.values() and keycode not in {USAGE_TO_EVKEY.get(k) for k in pressed_keys}:
+                    release(ui_kb, keycode)
+                    key_states.remove(keycode)
+                    actions.append(f"{key_name(keycode)} Released")
+
+                    cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
+                    commands_to_execute.extend(cmds)
+        else:
+            actions.append("Keyboard report too short")
+
+    # ───────────────────────────────────────────────────────────────
+    # System control (power/sleep/wake usually 1 byte bitfield)
+    # ───────────────────────────────────────────────────────────────
     elif report_type == "system":
         value = payload[0] if len(payload) >= 1 else 0
         system_pressed_by_source.setdefault(source, set())
@@ -793,22 +858,27 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     release(ui_kb, keycode)
                     system_pressed_by_source[source].remove(keycode)
                     actions.append(f"{key_name(keycode)} Released")
+
                     cmds = await handle_key_release_triggers(keycode, system_press_times, current_modifiers, actions)
                     commands_to_execute.extend(cmds)
 
     else:
-        actions.append(f"Unsupported HID report length {len(data)}")
+        actions.append(f"Unsupported report type={report_type} length={len(data)}")
 
+    # ───────────────────────────────────────────────────────────────
+    # Logging
+    # ───────────────────────────────────────────────────────────────
     rid_str = f" id={report_id}" if report_id is not None else ""
     raw_hex = data.hex()
     payload_hex = payload.hex() if payload is not None else ""
     id_flag = "yes" if id_included else "no"
     action_str = "; ".join(actions) if actions else "No mapped actions"
+
     printlog(
         f"[{source}] Report type={report_type}{rid_str} raw={raw_hex} payload={payload_hex} "
-        f"id_included={id_flag} resolve={resolve_reason}  {action_str}"
+        f"id_included={id_flag} resolve={resolve_reason} {action_str}"
     )
-    
+
     for command in commands_to_execute:
         await execute_trigger_command(command)
 
