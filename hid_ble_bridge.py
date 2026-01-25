@@ -716,8 +716,12 @@ async def main():
             printlog("Waiting for input events. Press Ctrl+C to quit.")
             await stop_event.wait()
 
-        except BleakDeviceNotFoundError as err:
-            printlog(f"{err}. Try pressing device button when launching")
+        except (asyncio.TimeoutError, asyncio.CancelledError) as err:
+            printlog(f"Connect failed: {err}. Will retry...")
+        except BleakDBusError as err:
+            printlog(f"Bleak DBus error during connect: {err}. Will retry...")
+        except Exception as err:
+            printlog(f"Unexpected error during connect: {err}. Will retry...")
 
         finally:
             await cleanup(client, notification_tasks)
