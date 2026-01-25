@@ -485,19 +485,13 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         usage = int.from_bytes(padded_data[:4], "little")
         
         # Validate that padding bytes (if any) are zero
-        # For 2-byte reports: data[2:] should be empty
-        # For 3-byte reports: check data[3] if exists beyond usage bits
-        # For 4-byte reports: check data[4:] if exists beyond usage bits
+        # Consumer/media usages are typically 16-bit, so bytes beyond the first 2 should be zero
         has_unexpected_bytes = False
         if len(data) > 2:
-            # Check if extra bytes beyond the first 2 are non-zero (when usage fits in 2 bytes)
-            # Most consumer usages are 16-bit, so bytes beyond that should be zero
             extra_bytes = data[2:]
             if any(b != 0 for b in extra_bytes):
-                # Only log if the usage itself fits in 2 bytes (< 0x10000)
-                if usage < 0x10000:
-                    has_unexpected_bytes = True
-                    printlog(f"[{source}] Unexpected non-zero padding in {len(data)}-byte media report: {data.hex()} (usage=0x{usage:04X}, extra bytes={extra_bytes.hex()})")
+                has_unexpected_bytes = True
+                printlog(f"[{source}] Unexpected non-zero padding in {len(data)}-byte media report: {data.hex()} (usage=0x{usage:04X}, extra bytes={extra_bytes.hex()})")
         
         media_pressed_by_source.setdefault(source, set())
 
