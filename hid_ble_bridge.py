@@ -63,6 +63,13 @@ MEDIA_USAGE_TO_EVKEY = {
     0x022A: e.KEY_BOOKMARKS,      # AC Bookmarks
 }
 
+# System control (HID Usage Page 0x01, Usage 0x80, bits 0..2)
+SYSTEM_BITS_TO_EVKEY = {
+    0: e.KEY_POWER,    # System Power Down
+    1: e.KEY_SLEEP,    # System Sleep
+    2: e.KEY_WAKEUP,   # System Wake Up
+}
+
 MOD_BITS_TO_EVKEY = {
     0: e.KEY_LEFTCTRL, 1: e.KEY_LEFTSHIFT, 2: e.KEY_LEFTALT, 3: e.KEY_LEFTMETA,
     4: e.KEY_RIGHTCTRL, 5: e.KEY_RIGHTSHIFT, 6: e.KEY_RIGHTALT, 7: e.KEY_RIGHTMETA,
@@ -91,8 +98,13 @@ key_states = set()
 key_press_times = {}  # track when keys were pressed for hold duration
 media_pressed_by_source = {}  # track currently pressed media keys per source
 media_press_times = {}  # track when media keys were pressed for hold duration
+system_pressed_by_source = {}  # track system control presses per source
+system_press_times = {}  # track when system control keys were pressed for hold duration
 current_modifiers = set()  # track currently active modifiers for trigger matching
 stop_loop = False
+
+# Report definitions parsed from HID Report Map
+report_definitions = {}  # report_id -> {"type": str, "size_bytes": int, "usage_pairs": set}
 
 # Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
 MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
@@ -440,6 +452,116 @@ async def prepare_device_for_connection(mac_address: str) -> bool:
 
 
 # ==============================================================================
+# HID Report Map parsing
+# ==============================================================================
+
+def determine_report_type(usage_pairs: set) -> str:
+    for usage_page, usage in usage_pairs:
+        if usage_page == 0x01 and usage == 0x02:
+            return "mouse"
+        if usage_page == 0x01 and usage == 0x06:
+            return "keyboard"
+        if usage_page == 0x0C and usage == 0x01:
+            return "consumer"
+        if usage_page == 0x01 and usage == 0x80:
+            return "system"
+    return "unknown"
+
+def parse_hid_report_map(report_map: bytes) -> dict:
+    """
+    Parse HID Report Map to build report definitions by report ID.
+    Returns dict: report_id -> { "type": str, "size_bytes": int, "usage_pairs": set }
+    """
+    report_bits = {}
+    report_types = {}
+    usage_page = None
+    usage = None
+    report_size = 0
+    report_count = 0
+    report_id = 0
+    collection_stack = []
+
+    i = 0
+    while i < len(report_map):
+        prefix = report_map[i]
+
+        # Long item
+        if prefix == 0xFE and i + 2 < len(report_map):
+            data_len = report_map[i + 1]
+            i += 2 + data_len
+            continue
+
+        size_code = prefix & 0x03
+        size = 4 if size_code == 3 else size_code
+        item_type = (prefix >> 2) & 0x03
+        tag = (prefix >> 4) & 0x0F
+        data = report_map[i + 1:i + 1 + size] if size else b""
+        value = int.from_bytes(data, "little") if size else 0
+
+        if item_type == 1:  # Global
+            if tag == 0x0:  # Usage Page
+                usage_page = value
+            elif tag == 0x7:  # Report Size
+                report_size = value
+            elif tag == 0x9:  # Report Count
+                report_count = value
+            elif tag == 0x8:  # Report ID
+                report_id = value
+        elif item_type == 2:  # Local
+            if tag == 0x0:  # Usage
+                usage = value
+        elif item_type == 0:  # Main
+            if tag == 0xA:  # Collection
+                collection_stack.append((usage_page, usage))
+            elif tag == 0xC:  # End Collection
+                if collection_stack:
+                    collection_stack.pop()
+            elif tag == 0x8:  # Input
+                bits = report_size * report_count
+                report_bits[report_id] = report_bits.get(report_id, 0) + bits
+                if collection_stack:
+                    report_types.setdefault(report_id, set()).add(collection_stack[-1])
+
+        i += 1 + size
+
+    definitions = {}
+    for rid, bits in report_bits.items():
+        size_bytes = (bits + 7) // 8
+        usage_pairs = report_types.get(rid, set())
+        report_type = determine_report_type(usage_pairs)
+        definitions[rid] = {
+            "type": report_type,
+            "size_bytes": size_bytes,
+            "usage_pairs": usage_pairs,
+        }
+    return definitions
+
+def resolve_report_definition(data: bytes):
+    """
+    Resolve report ID + payload based on report definitions.
+    Handles devices that omit report IDs by matching payload length.
+    """
+    if not report_definitions:
+        return None
+
+    if data and data[0] in report_definitions:
+        definition = report_definitions[data[0]]
+        size_bytes = definition["size_bytes"]
+        if len(data) - 1 >= size_bytes:
+            return data[0], definition, data[1:1 + size_bytes]
+
+    matches = []
+    for rid, definition in report_definitions.items():
+        if len(data) == definition["size_bytes"]:
+            matches.append((rid, definition))
+
+    if len(matches) == 1:
+        rid, definition = matches[0]
+        return rid, definition, data
+
+    return None
+
+# ==============================================================================
 # HID handling functions with enhanced logging
 # ==============================================================================
 
@@ -472,13 +594,38 @@ def key_name(keycode: int) -> str:
 
 
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
-    global key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
+    global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers, key_press_times, media_press_times, system_press_times
     actions = []
     commands_to_execute = []
 
-    # Media key report (2 bytes)
-    if len(data) == 2:
-        usage = int.from_bytes(data, "little")
+    report_id = None
+    report_type = None
+    payload = data
+
+    resolved = resolve_report_definition(data)
+    if resolved:
+        report_id, definition, payload = resolved
+        report_type = definition["type"]
+
+    # Fallback heuristics if report map is unavailable or ambiguous
+    if report_type is None:
+        if len(data) in (2, 3):
+            report_type = "consumer"
+        elif len(data) == 5:
+            report_type = "mouse"
+        elif len(data) == 8:
+            report_type = "keyboard"
+        elif len(data) == 1:
+            report_type = "system"
+        else:
+            report_type = "unknown"
+
+    # Consumer control report (2 bytes payload)
+    if report_type == "consumer":
+        if len(payload) >= 2:
+            usage = int.from_bytes(payload[:2], "little")
+        else:
+            usage = 0
         media_pressed_by_source.setdefault(source, set())
 
         if usage in MEDIA_USAGE_TO_EVKEY and usage != 0:
@@ -505,10 +652,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         else:
             actions.append(f"Unknown media usage {usage}")
 
-    # Keyboard report (8 bytes)
-    elif len(data) == 8:
-        modifiers = data[0]
-        pressed_keys = {k for k in data[2:] if k != 0}
+    # Keyboard report (8 bytes payload)
+    elif report_type == "keyboard":
+        modifiers = payload[0] if len(payload) >= 1 else 0
+        pressed_keys = {k for k in payload[2:] if k != 0} if len(payload) >= 2 else set()
 
         # Update global modifier state
         current_modifiers.clear()
@@ -549,20 +696,42 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
                 commands_to_execute.extend(cmds)
 
-    # Mouse report (5 bytes)
-    elif len(data) == 5:
-        buttons = data[0]
-        x_mov = int.from_bytes(data[1:2], byteorder="little", signed=True)
-        y_mov = int.from_bytes(data[2:3], byteorder="little", signed=True)
-        scroll = int.from_bytes(data[4:5], byteorder="little", signed=True)
+    # Mouse report (buttons + X + Y + optional wheel)
+    elif report_type == "mouse":
+        buttons = payload[0] if len(payload) >= 1 else 0
+        x_mov = int.from_bytes(payload[1:2], byteorder="little", signed=True) if len(payload) >= 2 else 0
+        y_mov = int.from_bytes(payload[2:3], byteorder="little", signed=True) if len(payload) >= 3 else 0
+        scroll = int.from_bytes(payload[3:4], byteorder="little", signed=True) if len(payload) >= 4 else 0
         inject_mouse_event(ui_mouse, buttons, x_mov, y_mov, scroll)
         actions.append(f"Mouse buttons={buttons:02x} x={x_mov} y={y_mov} scroll={scroll}")
+
+    # System control report (bitfield)
+    elif report_type == "system":
+        value = payload[0] if len(payload) >= 1 else 0
+        system_pressed_by_source.setdefault(source, set())
+        current_time = time.time()
+
+        for bit, keycode in SYSTEM_BITS_TO_EVKEY.items():
+            if value & (1 << bit):
+                if keycode not in system_pressed_by_source[source]:
+                    press(ui_kb, keycode)
+                    system_pressed_by_source[source].add(keycode)
+                    system_press_times[keycode] = current_time
+                    actions.append(f"{key_name(keycode)} Pressed")
+            else:
+                if keycode in system_pressed_by_source[source]:
+                    release(ui_kb, keycode)
+                    system_pressed_by_source[source].remove(keycode)
+                    actions.append(f"{key_name(keycode)} Released")
+                    cmds = await handle_key_release_triggers(keycode, system_press_times, current_modifiers, actions)
+                    commands_to_execute.extend(cmds)
 
     else:
         actions.append(f"Unsupported HID report length {len(data)}")
 
+    rid_str = f" id={report_id}" if report_id is not None else ""
     action_str = "; ".join(actions) if actions else "No mapped actions"
-    printlog(f"[{source}] Decoding HID report: {data.hex()}  {action_str}")
+    printlog(f"[{source}] Report type={report_type}{rid_str} data={data.hex()}  {action_str}")
     
     # Execute commands AFTER logging, so logs appear in correct order
     for command in commands_to_execute:
@@ -605,15 +774,17 @@ async def cleanup(client, tasks):
             printlog(f"Error during disconnect: {e}")
     
     # Clear task list to prevent memory leaks on reconnection
-    global notification_tasks, key_states, media_pressed_by_source, current_modifiers, key_press_times, media_press_times
+    global notification_tasks, key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers, key_press_times, media_press_times, system_press_times
     notification_tasks.clear()
     
     # Reset key states to prevent stuck keys after disconnect
     key_states.clear()
     media_pressed_by_source.clear()
+    system_pressed_by_source.clear()
     current_modifiers.clear()
     key_press_times.clear()
     media_press_times.clear()
+    system_press_times.clear()
 
 
 # ==============================================================================
@@ -630,7 +801,7 @@ async def main():
     parser.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
     args = parser.parse_args()
 
-    global stop_loop, debug, triggers
+    global stop_loop, debug, triggers, report_definitions
 
     if args.debug:
         debug = True
@@ -689,7 +860,7 @@ async def main():
     signal.signal(signal.SIGQUIT, handle_sigint)
     signal.signal(signal.SIGHUP, handle_sigint)
 
-    kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values())}
+    kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values()) | set(SYSTEM_BITS_TO_EVKEY.values())}
     mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
     
     ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
@@ -704,6 +875,20 @@ async def main():
         try:
             await client.connect()
             printlog(f"Connected to BLE device {device_mac}.")
+
+            # Read and parse report map (best-effort)
+            try:
+                report_map = await client.read_gatt_char(UUID_HID_REPORT)
+                report_definitions = parse_hid_report_map(report_map)
+                if report_definitions:
+                    for rid, definition in report_definitions.items():
+                        rid_label = f"ID {rid}" if rid != 0 else "no ID"
+                        printlog(f"Report {rid_label}: type={definition['type']} size={definition['size_bytes']} bytes")
+                else:
+                    printlog("Report map parsed but no report definitions found.")
+            except Exception as e:
+                report_definitions = {}
+                printlog(f"Failed to read/parse Report Map: {e}")
 
             hid_reports = [
                 char for svc in client.services if svc.uuid == UUID_HID_SERVICE
