@@ -556,29 +556,38 @@ def determine_report_type(usage_pairs: set) -> str:
             return "system"
     return "unknown"
 
-
 def resolve_report_definition(data: bytes):
     """
     Resolve report ID + payload based on report definitions.
     Handles devices that omit report IDs by matching payload length.
+    Returns: (report_id, definition, payload, id_included, resolve_reason)
     """
     if not report_definitions:
         return None
 
-    if report_ids_present and data and data[0] in report_definitions:
+    # Case 1: Report ID is included in data
+    if data and data[0] in report_definitions:
         definition = report_definitions[data[0]]
         size_bytes = definition["size_bytes"]
         if len(data) - 1 >= size_bytes:
-            return data[0], definition, data[1:1 + size_bytes]
+            return data[0], definition, data[1:1 + size_bytes], True, "id"
 
+    # Case 2: No report ID in data, match by payload size
     matches = []
     for rid, definition in report_definitions.items():
         if len(data) == definition["size_bytes"]:
             matches.append((rid, definition))
 
+    known_sizes = ", ".join(f"{rid}:{d['size_bytes']}" for rid, d in report_definitions.items())
+    printlog(
+        f"resolve_report_definition: len={len(data)} "
+        f"known_sizes={{{known_sizes}}} "
+        f"matches={[rid for rid, _ in matches]}"
+    )
+    
     if len(matches) == 1:
         rid, definition = matches[0]
-        return rid, definition, data
+        return rid, definition, data, False, "length"
 
     return None
 
@@ -613,7 +622,6 @@ def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
 def key_name(keycode: int) -> str:
     return KEYCODE_TO_NAME.get(keycode, f"KEY_{keycode}")
 
-
 async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
     global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers, key_press_times, media_press_times, system_press_times
     actions = []
@@ -622,10 +630,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     report_id = None
     report_type = None
     payload = data
+    id_included = False
+    resolve_reason = "none"
 
     resolved = resolve_report_definition(data)
     if resolved:
-        report_id, definition, payload = resolved
+        report_id, definition, payload, id_included, resolve_reason = resolved
         report_type = definition["type"]
 
     # Fallback heuristics if report map is unavailable or ambiguous
@@ -658,14 +668,12 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 media_pressed_by_source[source].add(keycode)
                 media_press_times[keycode] = current_time
                 actions.append(f"{key_name(keycode)} Pressed")
-                # Note: We don't execute triggers on press, only on release
         elif usage == 0:
             to_release = list(media_pressed_by_source[source])
             for keycode in to_release:
                 release(ui_kb, keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Collect commands to execute after logging
                 cmds = await handle_key_release_triggers(keycode, media_press_times, current_modifiers, actions)
                 commands_to_execute.extend(cmds)
                 
@@ -678,7 +686,6 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         modifiers = payload[0] if len(payload) >= 1 else 0
         pressed_keys = {k for k in payload[2:] if k != 0} if len(payload) >= 2 else set()
 
-        # Update global modifier state
         current_modifiers.clear()
         
         for bit, keycode in MOD_BITS_TO_EVKEY.items():
@@ -703,7 +710,6 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     key_states.add(keycode)
                     key_press_times[keycode] = current_time
                     actions.append(f"{key_name(keycode)} Pressed")
-                    # Note: We don't execute triggers on press, only on release
             else:
                 actions.append(f"Unknown key usage {key}")
 
@@ -713,7 +719,6 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                 key_states.remove(keycode)
                 actions.append(f"{key_name(keycode)} Released")
                 
-                # Collect commands to execute after logging
                 cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
                 commands_to_execute.extend(cmds)
 
@@ -751,13 +756,17 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         actions.append(f"Unsupported HID report length {len(data)}")
 
     rid_str = f" id={report_id}" if report_id is not None else ""
+    raw_hex = data.hex()
+    payload_hex = payload.hex() if payload is not None else ""
+    id_flag = "yes" if id_included else "no"
     action_str = "; ".join(actions) if actions else "No mapped actions"
-    printlog(f"[{source}] Report type={report_type}{rid_str} data={data.hex()}  {action_str}")
+    printlog(
+        f"[{source}] Report type={report_type}{rid_str} raw={raw_hex} payload={payload_hex} "
+        f"id_included={id_flag} resolve={resolve_reason}  {action_str}"
+    )
     
-    # Execute commands AFTER logging, so logs appear in correct order
     for command in commands_to_execute:
         await execute_trigger_command(command)
-
 
 async def notification_handler(client: BleakClient, handle: int, ui_kb: UInput, ui_mouse: UInput):
     try:
