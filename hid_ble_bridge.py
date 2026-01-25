@@ -879,6 +879,7 @@ async def main():
             # Read and parse report map (best-effort)
             try:
                 report_map = await client.read_gatt_char(UUID_HID_REPORT)
+                printlog("HID Report Map:", report_map.hex())
                 report_definitions = parse_hid_report_map(report_map)
                 if report_definitions:
                     for rid, definition in report_definitions.items():
