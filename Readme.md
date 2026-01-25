@@ -71,7 +71,7 @@ Follow these steps to get the application running on PiCorePlayer:
    - download:
      ```ash
      wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/hid_ble_bridge.py
-     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/le_auto_pair.sh
+     wget https://github.com/paul-1/pcp-ble-gatt/raw/refs/heads/main/le_auto_pair.py
      pcp bu
      ```
 
