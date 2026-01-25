@@ -626,12 +626,12 @@ def resolve_report_definition(data: bytes):
             matches.append((rid, definition))
 
     # Debug log
-    known_sizes = ", ".join(f"{rid}:{d['size_bytes']}" for rid, d in report_definitions.items())
-    printlog(
-        f"resolve_report_definition: len={len(data)} "
-        f"known_sizes={{{known_sizes}}} "
-        f"matches={[rid for rid, _ in matches]}"
-    )
+    # known_sizes = ", ".join(f"{rid}:{d['size_bytes']}" for rid, d in report_definitions.items())
+    # printlog(
+        # f"resolve_report_definition: len={len(data)} "
+        # f"known_sizes={{{known_sizes}}} "
+        # f"matches={[rid for rid, _ in matches]}"
+    # )
 
     if len(matches) == 1:
         rid, definition = matches[0]
@@ -749,10 +749,14 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 
         inject_mouse_event(ui_mouse, buttons, x_mov, y_mov, scroll)
 
+        # actions.append(
+            # f"Mouse (effective {effective_len}B) btn={buttons:02x} "
+            # f"x={x_mov:+3} y={y_mov:+3} wheel={scroll:+2} "
+            # f"(seen: {sorted(seen_lengths)})"
+        # )
         actions.append(
-            f"Mouse (effective {effective_len}B) btn={buttons:02x} "
+            f"btn={buttons:02x} "
             f"x={x_mov:+3} y={y_mov:+3} wheel={scroll:+2} "
-            f"(seen: {sorted(seen_lengths)})"
         )
 
     # ───────────────────────────────────────────────────────────────
@@ -868,16 +872,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     # ───────────────────────────────────────────────────────────────
     # Logging
     # ───────────────────────────────────────────────────────────────
-    rid_str = f" id={report_id}" if report_id is not None else ""
-    raw_hex = data.hex()
     payload_hex = payload.hex() if payload is not None else ""
-    id_flag = "yes" if id_included else "no"
     action_str = "; ".join(actions) if actions else "No mapped actions"
 
-    printlog(
-        f"[{source}] Report type={report_type}{rid_str} raw={raw_hex} payload={payload_hex} "
-        f"id_included={id_flag} resolve={resolve_reason} {action_str}"
-    )
+    printlog(f"[{source}] Report type={report_type} payload={payload_hex} {action_str}")
 
     for command in commands_to_execute:
         await execute_trigger_command(command)
