@@ -450,23 +450,6 @@ async def prepare_device_for_connection(mac_address: str) -> bool:
     printlog("Device is ready for connection.")
     return True
 
-
-# ==============================================================================
-# HID Report Map parsing
-# ==============================================================================
-
-def determine_report_type(usage_pairs: set) -> str:
-    for usage_page, usage in usage_pairs:
-        if usage_page == 0x01 and usage == 0x02:
-            return "mouse"
-        if usage_page == 0x01 and usage == 0x06:
-            return "keyboard"
-        if usage_page == 0x0C and usage == 0x01:
-            return "consumer"
-        if usage_page == 0x01 and usage == 0x80:
-            return "system"
-    return "unknown"
-
 def parse_hid_report_map(report_map: bytes) -> dict:
     """
     Parse HID Report Map to build report definitions by report ID.
@@ -479,7 +462,7 @@ def parse_hid_report_map(report_map: bytes) -> dict:
     report_size = 0
     report_count = 0
     report_id = 0
-    collection_stack = []
+    collection_stack = []  # each entry: {"usage_page": int, "usage": int, "type": int}
 
     i = 0
     while i < len(report_map):
@@ -512,15 +495,31 @@ def parse_hid_report_map(report_map: bytes) -> dict:
                 usage = value
         elif item_type == 0:  # Main
             if tag == 0xA:  # Collection
-                collection_stack.append((usage_page, usage))
+                collection_type = value & 0xFF  # 0x01 = Application, 0x00 = Physical
+                collection_stack.append({
+                    "usage_page": usage_page,
+                    "usage": usage,
+                    "type": collection_type,
+                })
             elif tag == 0xC:  # End Collection
                 if collection_stack:
                     collection_stack.pop()
             elif tag == 0x8:  # Input
                 bits = report_size * report_count
                 report_bits[report_id] = report_bits.get(report_id, 0) + bits
-                if collection_stack:
-                    report_types.setdefault(report_id, set()).add(collection_stack[-1])
+
+                # Prefer nearest Application collection for report type
+                app_usage = None
+                for item in reversed(collection_stack):
+                    if item["type"] == 0x01:  # Application
+                        app_usage = (item["usage_page"], item["usage"])
+                        break
+
+                if app_usage:
+                    report_types.setdefault(report_id, set()).add(app_usage)
+                elif collection_stack:
+                    top = collection_stack[-1]
+                    report_types.setdefault(report_id, set()).add((top["usage_page"], top["usage"]))
 
         i += 1 + size
 
@@ -535,6 +534,23 @@ def parse_hid_report_map(report_map: bytes) -> dict:
             "usage_pairs": usage_pairs,
         }
     return definitions
+    
+# ==============================================================================
+# HID Report Map parsing
+# ==============================================================================
+
+def determine_report_type(usage_pairs: set) -> str:
+    for usage_page, usage in usage_pairs:
+        if usage_page == 0x01 and usage == 0x02:
+            return "mouse"
+        if usage_page == 0x01 and usage == 0x06:
+            return "keyboard"
+        if usage_page == 0x0C and usage == 0x01:
+            return "consumer"
+        if usage_page == 0x01 and usage == 0x80:
+            return "system"
+    return "unknown"
+
 
 def resolve_report_definition(data: bytes):
     """
@@ -878,8 +894,8 @@ async def main():
 
             # Read and parse report map (best-effort)
             try:
-                report_map = await client.read_gatt_char(UUID_HID_REPORT)
-                printlog("HID Report Map:", report_map.hex())
+                report_map = await client.read_gatt_char(UUID_HID_REPORT_MAP)
+                printlog(f"HID Report Map: {report_map.hex()}")
                 report_definitions = parse_hid_report_map(report_map)
                 if report_definitions:
                     for rid, definition in report_definitions.items():
