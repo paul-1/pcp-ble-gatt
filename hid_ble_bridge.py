@@ -19,7 +19,7 @@ from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
 # BLE UUIDs for HID Service and Characteristics
 UUID_HID_SERVICE = "00001812-0000-1000-8000-00805f9b34fb"  # HID Service
 UUID_HID_REPORT_MAP = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
-UUID_HID_REPORT = UUID_HID_REPORT_MAP  # UUID_HID_REPORT = UUID_HID_REPORT_MAP
+UUID_HID_REPORT = UUID_HID_REPORT_MAP
 
 # Key Mappings for HID Usages
 USAGE_TO_EVKEY = {
@@ -482,16 +482,14 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         # Decode as little-endian, handling variable length with strict zero-padding validation
         # Pad with zeros to 4 bytes for consistent decoding
         padded_data = data + b'\x00' * (4 - len(data))
-        usage = int.from_bytes(padded_data[:4], "little")
+        usage = int.from_bytes(padded_data, "little")
         
         # Validate that padding bytes (if any) are zero
         # Consumer/media usages are typically 16-bit, so bytes beyond the first 2 should be zero
         has_unexpected_bytes = False
-        if len(data) > 2:
-            extra_bytes = data[2:]
-            if any(b != 0 for b in extra_bytes):
-                has_unexpected_bytes = True
-                printlog(f"[{source}] Unexpected non-zero padding in {len(data)}-byte media report: {data.hex()} (usage=0x{usage:04X}, extra bytes={extra_bytes.hex()})")
+        if len(data) > 2 and any(data[2:]):
+            has_unexpected_bytes = True
+            printlog(f"[{source}] Unexpected non-zero padding in {len(data)}-byte media report: {data.hex()} (usage=0x{usage:04X}, extra bytes={data[2:].hex()})")
         
         media_pressed_by_source.setdefault(source, set())
 
