@@ -886,9 +886,9 @@ async def main():
                         printlog(f"Report {rid_label}: type={definition['type']} size={definition['size_bytes']} bytes")
                 else:
                     printlog("Report map parsed but no report definitions found.")
-            except Exception as e:
+            except Exception as err:
                 report_definitions = {}
-                printlog(f"Failed to read/parse Report Map: {e}")
+                printlog(f"Failed to read/parse Report Map: {err}")
 
             hid_reports = [
                 char for svc in client.services if svc.uuid == UUID_HID_SERVICE
