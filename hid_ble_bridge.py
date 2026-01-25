@@ -62,6 +62,7 @@ MEDIA_USAGE_TO_EVKEY = {
     0x0226: e.KEY_STOP,           # AC Stop
     0x0227: e.KEY_REFRESH,        # AC Refresh
     0x022A: e.KEY_BOOKMARKS,      # AC Bookmarks
+    0x0030: e.KEY_POWER,          # Power Button
 }
 
 # System control (HID Usage Page 0x01, Usage 0x80, bits 0..2)
