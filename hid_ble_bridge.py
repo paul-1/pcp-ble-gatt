@@ -454,92 +454,142 @@ async def prepare_device_for_connection(mac_address: str) -> bool:
 
 def parse_hid_report_map(report_map: bytes) -> dict:
     """
-    Parse HID Report Map to build report definitions by report ID.
-    Returns dict: report_id -> { "type": str, "size_bytes": int, "usage_pairs": set }
+    Parse HID Report Map (USB/BLE HID Report Descriptor) and build report definitions.
+    
+    Returns dict:
+        report_id -> {
+            "type": str,                # e.g. "mouse", "keyboard", "consumer", "system", etc.
+            "direction": str,           # "input", "output", "feature" (most common: input)
+            "size_bytes": int,
+            "bits": int,
+            "usage_pairs": set of tuples (usage_page, usage)
+        }
     """
-    global report_ids_present
+    report_data = {}          # report_id → {"bits": int, "usages": set, "directions": set}
     report_ids_present = False
-    report_bits = {}
-    report_types = {}
-    usage_page = None
-    usage = None
+
+    # Parser state
+    usage_page = 0
+    usage = 0
+    report_id = 0
     report_size = 0
     report_count = 0
-    report_id = 0
-    collection_stack = []  # each entry: {"usage_page": int, "usage": int, "type": int}
+    collection_stack = []     # list of {"usage_page": int, "usage": int, "type": int}
 
     i = 0
     while i < len(report_map):
         prefix = report_map[i]
+        i += 1
 
-        # Long item
-        if prefix == 0xFE and i + 2 < len(report_map):
-            data_len = report_map[i + 1]
-            i += 2 + data_len
+        # Long item (rare in practice)
+        if prefix == 0xFE:
+            if i + 1 >= len(report_map):
+                break
+            data_len = report_map[i]
+            i += 1 + data_len
             continue
 
+        # Short item
         size_code = prefix & 0x03
-        size = 4 if size_code == 3 else size_code
-        item_type = (prefix >> 2) & 0x03
-        tag = (prefix >> 4) & 0x0F
-        data = report_map[i + 1:i + 1 + size] if size else b""
-        value = int.from_bytes(data, "little") if size else 0
+        item_size = 0 if size_code == 0 else (1 if size_code == 1 else (2 if size_code == 2 else 4))
+        item_type = (prefix >> 2) & 0x03   # 0=main, 1=global, 2=local, 3=reserved
+        tag       = (prefix >> 4) & 0x0F
+
+        # Read data bytes
+        if i + item_size > len(report_map):
+            break
+        data_bytes = report_map[i:i + item_size]
+        value = int.from_bytes(data_bytes, "little") if item_size else 0
+        i += item_size
 
         if item_type == 1:  # Global
-            if tag == 0x0:  # Usage Page
+            if tag == 0x0:   # Usage Page
                 usage_page = value
-            elif tag == 0x7:  # Report Size
+            elif tag == 0x1: # Logical Minimum
+                pass
+            elif tag == 0x2: # Logical Maximum
+                pass
+            elif tag == 0x7: # Report Size
                 report_size = value
-            elif tag == 0x9:  # Report Count
-                report_count = value
-            elif tag == 0x8:  # Report ID
+            elif tag == 0x8: # Report ID
                 report_id = value
                 report_ids_present = True
+            elif tag == 0x9: # Report Count
+                report_count = value
+
         elif item_type == 2:  # Local
-            if tag == 0x0:  # Usage
+            if tag == 0x0:    # Usage
                 usage = value
+            # You could also track Usage Minimum/Maximum, but we keep it simple
+
         elif item_type == 0:  # Main
-            if tag == 0xA:  # Collection
-                collection_type = value & 0xFF  # 0x01 = Application, 0x00 = Physical
+            if tag == 0xA:    # Collection
+                collection_type = value & 0xFF  # 0x00=Physical, 0x01=Application, etc.
                 collection_stack.append({
                     "usage_page": usage_page,
                     "usage": usage,
-                    "type": collection_type,
+                    "type": collection_type
                 })
+                usage = 0  # reset local usage after starting collection
+
             elif tag == 0xC:  # End Collection
                 if collection_stack:
                     collection_stack.pop()
-            elif tag == 0x8:  # Input
-                bits = report_size * report_count
-                report_bits[report_id] = report_bits.get(report_id, 0) + bits
 
-                # Prefer nearest Application collection for report type
+            elif tag in (0x8, 0x9, 0xB):  # Input (0x8), Output (0x9), Feature (0xB)
+                if report_size == 0 or report_count == 0:
+                    continue
+
+                bits = report_size * report_count
+                direction = {0x8: "input", 0x9: "output", 0xB: "feature"}[tag]
+
+                # Accumulate
+                if report_id not in report_data:
+                    report_data[report_id] = {
+                        "bits": 0,
+                        "usages": set(),
+                        "directions": set()
+                    }
+
+                report_data[report_id]["bits"] += bits
+                report_data[report_id]["directions"].add(direction)
+
+                # Find the nearest Application collection for type hint
                 app_usage = None
-                for item in reversed(collection_stack):
-                    if item["type"] == 0x01:  # Application
-                        app_usage = (item["usage_page"], item["usage"])
+                for coll in reversed(collection_stack):
+                    if coll["type"] == 0x01:  # Application
+                        app_usage = (coll["usage_page"], coll["usage"])
                         break
+                if not app_usage and collection_stack:
+                    top = collection_stack[-1]
+                    app_usage = (top["usage_page"], top["usage"])
 
                 if app_usage:
-                    report_types.setdefault(report_id, set()).add(app_usage)
-                elif collection_stack:
-                    top = collection_stack[-1]
-                    report_types.setdefault(report_id, set()).add((top["usage_page"], top["usage"]))
+                    report_data[report_id]["usages"].add(app_usage)
 
-        i += 1 + size
+                # Reset consumed state (this was the main bug)
+                report_size = 0
+                report_count = 0
 
+    # Build final result
     definitions = {}
-    for rid, bits in report_bits.items():
-        size_bytes = (bits + 7) // 8
-        usage_pairs = report_types.get(rid, set())
-        report_type = determine_report_type(usage_pairs)
+    for rid, info in report_data.items():
+        size_bytes = (info["bits"] + 7) // 8
+        usage_pairs = info["usages"]
+        directions = info["directions"]
+
+        report_type = determine_report_type(usage_pairs)  # your existing function
+
         definitions[rid] = {
             "type": report_type,
+            "direction": "input" if "input" in directions else list(directions)[0] if directions else "unknown",
             "size_bytes": size_bytes,
+            "bits": info["bits"],
             "usage_pairs": usage_pairs,
         }
+
     return definitions
-    
+
 # ==============================================================================
 # HID Report Map parsing
 # ==============================================================================
