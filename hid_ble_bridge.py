@@ -18,8 +18,7 @@ from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
 
 # BLE UUIDs for HID Service and Characteristics
 UUID_HID_SERVICE = "00001812-0000-1000-8000-00805f9b34fb"  # HID Service
-UUID_HID_REPORT_MAP = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
-UUID_HID_REPORT = UUID_HID_REPORT_MAP
+UUID_HID_REPORT = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
 
 # Key Mappings for HID Usages
 USAGE_TO_EVKEY = {
