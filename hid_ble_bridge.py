@@ -19,6 +19,7 @@ from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
 # BLE UUIDs for HID Service and Characteristics
 UUID_HID_SERVICE = "00001812-0000-1000-8000-00805f9b34fb"  # HID Service
 UUID_HID_REPORT = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
+UUID_HID_REPORT_MAP = "00002a4b-0000-1000-8000-00805f9b34fb"   # HID Report Map
 
 # Key Mappings for HID Usages
 USAGE_TO_EVKEY = {
@@ -105,6 +106,7 @@ stop_loop = False
 
 # Report definitions parsed from HID Report Map
 report_definitions = {}  # report_id -> {"type": str, "size_bytes": int, "usage_pairs": set}
+report_ids_present = False  # set True if Report Map declares any Report IDs
 
 # Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
 MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
@@ -455,6 +457,8 @@ def parse_hid_report_map(report_map: bytes) -> dict:
     Parse HID Report Map to build report definitions by report ID.
     Returns dict: report_id -> { "type": str, "size_bytes": int, "usage_pairs": set }
     """
+    global report_ids_present
+    report_ids_present = False
     report_bits = {}
     report_types = {}
     usage_page = None
@@ -490,6 +494,7 @@ def parse_hid_report_map(report_map: bytes) -> dict:
                 report_count = value
             elif tag == 0x8:  # Report ID
                 report_id = value
+                report_ids_present = True
         elif item_type == 2:  # Local
             if tag == 0x0:  # Usage
                 usage = value
@@ -560,7 +565,7 @@ def resolve_report_definition(data: bytes):
     if not report_definitions:
         return None
 
-    if data and data[0] in report_definitions:
+    if report_ids_present and data and data[0] in report_definitions:
         definition = report_definitions[data[0]]
         size_bytes = definition["size_bytes"]
         if len(data) - 1 >= size_bytes:
@@ -817,7 +822,7 @@ async def main():
     parser.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
     args = parser.parse_args()
 
-    global stop_loop, debug, triggers, report_definitions
+    global stop_loop, debug, triggers, report_definitions, report_ids_present
 
     if args.debug:
         debug = True
@@ -901,10 +906,12 @@ async def main():
                     for rid, definition in report_definitions.items():
                         rid_label = f"ID {rid}" if rid != 0 else "no ID"
                         printlog(f"Report {rid_label}: type={definition['type']} size={definition['size_bytes']} bytes")
+                    printlog(f"Report IDs present: {report_ids_present}")
                 else:
                     printlog("Report map parsed but no report definitions found.")
             except Exception as err:
                 report_definitions = {}
+                report_ids_present = False
                 printlog(f"Failed to read/parse Report Map: {err}")
 
             hid_reports = [
