@@ -470,6 +470,8 @@ def parse_hid_report_map(report_map: bytes) -> dict:
             "usage_pairs": set of tuples (usage_page, usage)
         }
     """
+    global report_ids_present
+    
     report_data = {}          # report_id → {"bits": int, "usages": set, "directions": set}
     report_ids_present = False
 
@@ -645,7 +647,9 @@ def resolve_report_definition(data: bytes):
                 trimmed_payload = payload[:expected_size]
                 return report_id, definition, trimmed_payload, True, "report_id_padded"
         
-        # Size mismatch - fall through to try other methods
+        # Size mismatch with valid report ID - don't fall through to length matching
+        # since we know the first byte is a report ID but the data is malformed
+        return None
     
     # Case 2: Match by payload length (report ID is NOT in the data)
     # Also handles padding by accepting data length >= expected size
