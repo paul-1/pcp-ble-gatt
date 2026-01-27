@@ -614,17 +614,54 @@ def determine_report_type(usage_pairs: set) -> str:
 def resolve_report_definition(data: bytes):
     """
     Resolve report ID + payload based on report definitions.
-    For devices where report IDs are not included in the data, match by payload length.
+    Handles both cases:
+    - Report IDs included in data (first byte is report ID)
+    - Report IDs not included (match by payload length)
+    Also handles padding (extra zero bytes beyond expected size).
     Returns: (report_id, definition, payload, id_included, resolve_reason)
     """
-    if not report_definitions:
+    if not report_definitions or len(data) == 0:
         return None
 
-    # Match by payload length only (report ID is NOT in the data)
+    # Case 1: Report IDs are present in the descriptor, check if first byte is a report ID
+    if report_ids_present and data[0] in report_definitions:
+        report_id = data[0]
+        definition = report_definitions[report_id]
+        expected_size = definition.get("size_bytes", -1)
+        
+        # Payload is everything after the report ID byte
+        payload = data[1:]
+        
+        # Check if payload matches expected size (exact match)
+        if len(payload) == expected_size:
+            return report_id, definition, payload, True, "report_id_exact"
+        
+        # Check if payload is longer (padding case)
+        if len(payload) > expected_size:
+            # Verify extra bytes are zero (padding)
+            extra_bytes = payload[expected_size:]
+            if all(b == 0 for b in extra_bytes):
+                # Trim padding and return expected size payload
+                trimmed_payload = payload[:expected_size]
+                return report_id, definition, trimmed_payload, True, "report_id_padded"
+        
+        # Size mismatch - fall through to try other methods
+    
+    # Case 2: Match by payload length (report ID is NOT in the data)
+    # Also handles padding by accepting data length >= expected size
     matches = []
     for rid, definition in report_definitions.items():
-        if len(data) == definition.get("size_bytes", -1):
-            matches.append((rid, definition))
+        expected_size = definition.get("size_bytes", -1)
+        
+        # Exact match
+        if len(data) == expected_size:
+            matches.append((rid, definition, data, "length_exact"))
+        # Padded match - data is longer but extra bytes are zero
+        elif len(data) > expected_size:
+            extra_bytes = data[expected_size:]
+            if all(b == 0 for b in extra_bytes):
+                trimmed_data = data[:expected_size]
+                matches.append((rid, definition, trimmed_data, "length_padded"))
 
     # Debug log
     # known_sizes = ", ".join(f"{rid}:{d['size_bytes']}" for rid, d in report_definitions.items())
@@ -635,8 +672,8 @@ def resolve_report_definition(data: bytes):
     # )
 
     if len(matches) == 1:
-        rid, definition = matches[0]
-        return rid, definition, data, False, "length"
+        rid, definition, payload, reason = matches[0]
+        return rid, definition, payload, False, reason
 
     return None
     
