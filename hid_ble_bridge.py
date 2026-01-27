@@ -1071,10 +1071,10 @@ async def main():
     printlog("Cleaning up...")
     if ui_kb is not None:
         ui_kb.close()
+        printlog("Virtual keyboard stopped.")
     if ui_mouse is not None:
         ui_mouse.close()
-    if ui_kb is not None or ui_mouse is not None:
-        printlog("Virtual devices stopped.")
+        printlog("Virtual mouse stopped.")
 
 
 if __name__ == "__main__":
