@@ -645,27 +645,30 @@ def resolve_report_definition(data: bytes):
 # ==============================================================================
 
 def press(ui: UInput, keycode: int):
-    ui.write(e.EV_KEY, keycode, 1)
-    ui.syn()
+    if ui is not None:
+        ui.write(e.EV_KEY, keycode, 1)
+        ui.syn()
 
 
 def release(ui: UInput, keycode: int):
-    ui.write(e.EV_KEY, keycode, 0)
-    ui.syn()
+    if ui is not None:
+        ui.write(e.EV_KEY, keycode, 0)
+        ui.syn()
 
 
 def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
-    for bit, button in enumerate([e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE]):
-        if buttons & (1 << bit):
-            ui.write(e.EV_KEY, button, 1)
-        else:
-            ui.write(e.EV_KEY, button, 0)
+    if ui is not None:
+        for bit, button in enumerate([e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE]):
+            if buttons & (1 << bit):
+                ui.write(e.EV_KEY, button, 1)
+            else:
+                ui.write(e.EV_KEY, button, 0)
 
-    ui.write(e.EV_REL, e.REL_X, x)
-    ui.write(e.EV_REL, e.REL_Y, y)
-    if scroll != 0:
-        ui.write(e.EV_REL, e.REL_WHEEL, scroll)
-    ui.syn()
+        ui.write(e.EV_REL, e.REL_X, x)
+        ui.write(e.EV_REL, e.REL_Y, y)
+        if scroll != 0:
+            ui.write(e.EV_REL, e.REL_WHEEL, scroll)
+        ui.syn()
 
 
 def key_name(keycode: int) -> str:
@@ -1003,14 +1006,20 @@ async def main():
     signal.signal(signal.SIGQUIT, handle_sigint)
     signal.signal(signal.SIGHUP, handle_sigint)
 
-    kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values()) | set(SYSTEM_BITS_TO_EVKEY.values())}
-    mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
-    
-    ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
-    ui_mouse = create_uinput_with_retry(mouse_capabilities, "pCP BLE HID Mouse")
+    # Only create uinput devices if not using triggers-only mode
+    if args.triggers:
+        ui_kb = None
+        ui_mouse = None
+        printlog("Triggers-only mode: uinput devices not created")
+    else:
+        kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values()) | set(SYSTEM_BITS_TO_EVKEY.values())}
+        mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
+        
+        ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
+        ui_mouse = create_uinput_with_retry(mouse_capabilities, "pCP BLE HID Mouse")
 
-    printlog(f"Virtual keyboard created: {ui_kb.device}")
-    printlog(f"Virtual mouse created: {ui_mouse.device}")
+        printlog(f"Virtual keyboard created: {ui_kb.device}")
+        printlog(f"Virtual mouse created: {ui_mouse.device}")
 
     while not stop_loop:
         printlog(f"Connecting to: {device_mac}...")
@@ -1060,9 +1069,12 @@ async def main():
             stop_event.clear()
 
     printlog("Cleaning up...")
-    ui_kb.close()
-    ui_mouse.close()
-    printlog("Virtual devices stopped.")
+    if ui_kb is not None:
+        ui_kb.close()
+        printlog("Virtual keyboard stopped.")
+    if ui_mouse is not None:
+        ui_mouse.close()
+        printlog("Virtual mouse stopped.")
 
 
 if __name__ == "__main__":
