@@ -1046,6 +1046,7 @@ async def main():
                 report_ids_present = False
                 printlog(f"Failed to read/parse Report Map: {err}")
 
+            report_mapping = {}
             report_chars = []
             for service in client.services:
                 for char in service.characteristics:
