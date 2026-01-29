@@ -675,7 +675,19 @@ def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
 def key_name(keycode: int) -> str:
     return KEYCODE_TO_NAME.get(keycode, f"KEY_{keycode}")
 
-async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
+async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes, 
+                                        explicit_report_type: str = None, explicit_size_bytes: int = None):
+    """
+    Decode HID report data and inject input events.
+    
+    Args:
+        ui_kb: keyboard uinput device
+        ui_mouse: mouse uinput device
+        source: source identifier for tracking state
+        data: raw HID report data
+        explicit_report_type: explicit report type from report map (e.g., "keyboard", "mouse", "consumer")
+        explicit_size_bytes: expected size in bytes from report map
+    """
     global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers
     global key_press_times, media_press_times, system_press_times
     global observed_mouse_lengths
@@ -683,30 +695,31 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     actions = []
     commands_to_execute = []
     report_id = None
-    report_type = None
+    report_type = explicit_report_type  # Use explicit type if provided
     payload = data
     id_included = False
-    resolve_reason = "none"
+    resolve_reason = "explicit" if explicit_report_type else "none"
 
-    # Try to resolve using report map / descriptor parser
-    resolved = resolve_report_definition(data)
-    if resolved:
-        report_id, definition, payload, id_included, resolve_reason = resolved
-        report_type = definition["type"]
-
-    # Fallback heuristics if descriptor didn't resolve or is missing
+    # Only use fallback heuristics if explicit type is not provided
     if report_type is None:
-        data_len = len(data)
-        if data_len in (2, 3):
-            report_type = "consumer"
-        elif data_len in (8, 9):           # common keyboard sizes (8 + reserved/padding)
-            report_type = "keyboard"
-        elif data_len == 1:
-            report_type = "system"
-        elif data_len in (4, 5, 6, 7):     # mouse common sizes
-            report_type = "mouse"
+        # Try to resolve using report map / descriptor parser
+        resolved = resolve_report_definition(data)
+        if resolved:
+            report_id, definition, payload, id_included, resolve_reason = resolved
+            report_type = definition["type"]
         else:
-            report_type = "unknown"
+            # Fallback heuristics if descriptor didn't resolve or is missing
+            data_len = len(data)
+            if data_len in (2, 3):
+                report_type = "consumer"
+            elif data_len in (8, 9):           # common keyboard sizes (8 + reserved/padding)
+                report_type = "keyboard"
+            elif data_len == 1:
+                report_type = "system"
+            elif data_len in (4, 5, 6, 7):     # mouse common sizes
+                report_type = "mouse"
+            else:
+                report_type = "unknown"
 
     # ───────────────────────────────────────────────────────────────
     # Mouse report – dynamic length + standard field parsing
@@ -885,13 +898,32 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     for command in commands_to_execute:
         await execute_trigger_command(command)
 
-async def notification_handler(client: BleakClient, handle: int, ui_kb: UInput, ui_mouse: UInput):
+async def notification_handler(client: BleakClient, report_info: dict, ui_kb: UInput, ui_mouse: UInput):
+    """
+    Handle notifications for a specific HID report.
+    
+    Args:
+        client: BLE client
+        report_info: Dictionary containing:
+            - handle: characteristic handle
+            - report_id: report ID
+            - report_type: report type ("keyboard", "mouse", "consumer", etc.) or None
+            - size_bytes: expected size in bytes or None
+        ui_kb: keyboard uinput device
+        ui_mouse: mouse uinput device
+    """
+    handle = report_info["handle"]
+    report_type = report_info.get("report_type")
+    size_bytes = report_info.get("size_bytes")
+    
     try:
         await client.start_notify(
             handle,
-            lambda _, data: asyncio.create_task(decode_hid_report_and_inject(ui_kb, ui_mouse, f"HID-{handle}", data)),
+            lambda _, data: asyncio.create_task(
+                decode_hid_report_and_inject(ui_kb, ui_mouse, f"HID-{handle}", data, report_type, size_bytes)
+            ),
         )
-        printlog(f"Started notifications for HID report (handle={handle}).")
+        printlog(f"Started notifications for HID report (handle={handle}, type={report_type}, size={size_bytes}).")
         while True:
             await asyncio.sleep(1)
     except asyncio.CancelledError:
@@ -1046,7 +1078,8 @@ async def main():
                 report_ids_present = False
                 printlog(f"Failed to read/parse Report Map: {err}")
 
-            report_mapping = {}
+            # Build comprehensive report info list that ties report IDs to handles
+            report_info_list = []
             report_chars = []
             for service in client.services:
                 for char in service.characteristics:
@@ -1054,24 +1087,47 @@ async def main():
                         report_chars.append(char)
 
             for char in report_chars:
-                # Read Report Reference descriptor, etc.
+                # Read Report Reference descriptor to get report ID and type
                 ref_desc = char.get_descriptor(REPORT_REFERENCE_UUID)
                 if ref_desc:
-                    ref_value = await client.read_gatt_descriptor(ref_desc.handle)
-                    report_id = ref_value[0]
-                    report_type = ref_value[1]
-                key = (report_id, report_type)
-                report_mapping[key] = char
+                    try:
+                        ref_value = await client.read_gatt_descriptor(ref_desc.handle)
+                        report_id = ref_value[0]
+                        report_type_val = ref_value[1]  # 1=Input, 2=Output, 3=Feature
+                        
+                        # Only process input reports that support notifications
+                        if report_type_val == 1 and "notify" in char.properties:
+                            # Get report definition from parsed report map
+                            if report_id in report_definitions:
+                                definition = report_definitions[report_id]
+                                report_info = {
+                                    "handle": char.handle,
+                                    "report_id": report_id,
+                                    "report_type": definition["type"],  # "keyboard", "mouse", "consumer", etc.
+                                    "size_bytes": definition["size_bytes"]
+                                }
+                                report_info_list.append(report_info)
+                                
+                                type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type_val, f"Unknown({report_type_val})")
+                                printlog(f"   Report ID {report_id} ({type_str}, {definition['type']}) handle={char.handle}, size={definition['size_bytes']} bytes")
+                            else:
+                                # No definition from report map, create basic info
+                                report_info = {
+                                    "handle": char.handle,
+                                    "report_id": report_id,
+                                    "report_type": None,  # Will use heuristics
+                                    "size_bytes": None
+                                }
+                                report_info_list.append(report_info)
+                                
+                                type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type_val, f"Unknown({report_type_val})")
+                                printlog(f"   Report ID {report_id} ({type_str}) handle={char.handle}, size=unknown")
+                    except Exception as err:
+                        printlog(f"Failed to read Report Reference for handle {char.handle}: {err}")
 
-                type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type, f"Unknown({report_type})")
-                print(f"   Report ID {report_id} ({type_str}) char UUID={char.uuid}, handle={char.handle}")
-
-            hid_reports = [
-                char for svc in client.services if svc.uuid == UUID_HID_SERVICE
-                for char in svc.characteristics if char.uuid == UUID_HID_REPORT and "notify" in char.properties
-            ]
-            for char in hid_reports:
-                task = asyncio.create_task(notification_handler(client, char.handle, ui_kb, ui_mouse))
+            # Create notification handlers with report info
+            for report_info in report_info_list:
+                task = asyncio.create_task(notification_handler(client, report_info, ui_kb, ui_mouse))
                 notification_tasks.append(task)
 
             printlog("Waiting for input events. Press Ctrl+C to quit.")
