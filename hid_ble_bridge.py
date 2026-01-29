@@ -1046,29 +1046,24 @@ async def main():
                 report_ids_present = False
                 printlog(f"Failed to read/parse Report Map: {err}")
 
-            # Find all standard Report characteristics (0x2A4D)
-            for char in client.services.get_characteristics_by_uuid(UUID_HID_REPORT):
-                # Read the mandatory Report Reference descriptor
+            report_chars = []
+            for service in client.services:
+                for char in service.characteristics:
+                    if char.uuid == REPORT_UUID:
+                        report_chars.append(char)
+
+            for char in report_chars:
+                # Read Report Reference descriptor, etc.
                 ref_desc = char.get_descriptor(REPORT_REFERENCE_UUID)
-                if not ref_desc:
-                    print(f"Warning: Report char {char.handle} missing Report Reference descriptor!")
-                    continue
-
-                ref_value = await client.read_gatt_descriptor(ref_desc.handle)
-                if len(ref_value) != 3:
-                    print(f"Invalid Report Reference length {len(ref_value)} on handle {char.handle}")
-                    continue
-
-                report_id   = ref_value[0]
-                report_type = ref_value[1]  # 1=Input, 2=Output, 3=Feature
-
+                if ref_desc:
+                    ref_value = await client.read_gatt_descriptor(ref_desc.handle)
+                    report_id = ref_value[0]
+                    report_type = ref_value[1]
                 key = (report_id, report_type)
                 report_mapping[key] = char
 
                 type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type, f"Unknown({report_type})")
                 print(f"  • Report ID {report_id:02X} ({type_str}) → char UUID={char.uuid}, handle=0x{char.handle:04X}")
-
-
 
             hid_reports = [
                 char for svc in client.services if svc.uuid == UUID_HID_SERVICE
