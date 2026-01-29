@@ -1064,7 +1064,7 @@ async def main():
                 report_mapping[key] = char
 
                 type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type, f"Unknown({report_type})")
-                print(f"  • Report ID {report_id:02X} ({type_str}) → char UUID={char.uuid}, handle=0x{char.handle:04X}")
+                print(f"   Report ID {report_id} ({type_str}) char UUID={char.uuid}, handle={char.handle}")
 
             hid_reports = [
                 char for svc in client.services if svc.uuid == UUID_HID_SERVICE
