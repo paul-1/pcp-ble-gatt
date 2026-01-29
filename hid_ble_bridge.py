@@ -686,7 +686,10 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         source: source identifier for tracking state
         data: raw HID report data
         explicit_report_type: explicit report type from report map (e.g., "keyboard", "mouse", "consumer")
-        explicit_size_bytes: expected size in bytes from report map
+        explicit_size_bytes: expected size in bytes from report map (reserved for future validation/verification)
+    
+    Note: explicit_size_bytes is currently reserved for future use. It could be used to validate
+    incoming data length or warn about mismatches, but for now we rely on the report type alone.
     """
     global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers
     global key_press_times, media_press_times, system_press_times
@@ -1097,6 +1100,9 @@ async def main():
                         
                         # Only process input reports that support notifications
                         if report_type_val == 1 and "notify" in char.properties:
+                            # Generate type string for logging (refactored to avoid duplication)
+                            type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type_val, f"Unknown({report_type_val})")
+                            
                             # Get report definition from parsed report map
                             if report_id in report_definitions:
                                 definition = report_definitions[report_id]
@@ -1107,8 +1113,6 @@ async def main():
                                     "size_bytes": definition["size_bytes"]
                                 }
                                 report_info_list.append(report_info)
-                                
-                                type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type_val, f"Unknown({report_type_val})")
                                 printlog(f"   Report ID {report_id} ({type_str}, {definition['type']}) handle={char.handle}, size={definition['size_bytes']} bytes")
                             else:
                                 # No definition from report map, create basic info
@@ -1119,8 +1123,6 @@ async def main():
                                     "size_bytes": None
                                 }
                                 report_info_list.append(report_info)
-                                
-                                type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type_val, f"Unknown({report_type_val})")
                                 printlog(f"   Report ID {report_id} ({type_str}) handle={char.handle}, size=unknown")
                     except Exception as err:
                         printlog(f"Failed to read Report Reference for handle {char.handle}: {err}")
