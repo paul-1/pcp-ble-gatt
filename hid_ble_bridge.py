@@ -1049,7 +1049,7 @@ async def main():
             report_chars = []
             for service in client.services:
                 for char in service.characteristics:
-                    if char.uuid == REPORT_UUID:
+                    if char.uuid == UUID_HID_REPORT:
                         report_chars.append(char)
 
             for char in report_chars:
