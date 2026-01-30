@@ -814,54 +814,84 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         else:
             actions.append("Consumer report too short")
 
-    # ───────────────────────────────────────────────────────────────
-    # Keyboard report (usually 8 bytes, sometimes 9 with reserved)
-    # ───────────────────────────────────────────────────────────────
+# Flexible keyboard report handler
+    # Supports:
+    # - 6 bytes: pure key array (no modifiers/reserved) — like your device's Report ID 2
+    # - 8 bytes: modifiers + reserved (ignored) + 6 keys — standard boot keyboard
+    # - 9 bytes: Report ID + modifiers + reserved + 6 keys — if ID prepended
+    # Assumes USAGE_TO_EVKEY maps HID usage (0x04–0xA4 etc.) to evdev keycodes
     elif report_type == "keyboard":
-        if len(payload) >= 8:
-            modifiers = payload[0]
-            # payload[1] usually reserved/0 — ignore
-            pressed_keys = {k for k in payload[2:8] if k != 0}
+        # First, check and optionally strip Report ID if present (assuming it's the first byte)
+        report_id = None
+        if len(payload) == 9:
+            report_id = payload[0]  # e.g., 0x02 for keyboard
+            payload = payload[1:]   # now treat as 8-byte
 
+
+        if len(payload) not in (6, 8):
+            actions.append(f"Keyboard report unexpected length {len(payload)} (expected 6,8,9)")
+        else:
+            # Now payload is either 6 or 8 bytes
+            modifiers_byte = 0  # default to no modifiers
+            reserved_offset = 0
+            keys_start = 0
+            num_keys = 6
+
+            if len(payload) == 8:
+                # Standard: modifiers (0) + reserved (1) + keys (2:8)
+                modifiers_byte = payload[0]
+                reserved_offset = 1  # ignore payload[1]
+                keys_start = 2
+            elif len(payload) == 6:
+                # Minimal: keys (0:6)
+                keys_start = 0
+            # else: already checked
+
+            # Extract pressed usages (HID key codes, non-zero)
+            pressed_usages = {k for k in payload[keys_start:keys_start + num_keys] if k != 0}
+
+            current_time = time.time()
+
+            # Handle modifiers if present
             current_modifiers.clear()
+            if len(payload) >= 8:  # only for formats with modifiers
+                for bit, keycode in MOD_BITS_TO_EVKEY.items():
+                    if modifiers_byte & (1 << bit):
+                        current_modifiers.add(keycode)
+                        if keycode not in key_states:
+                            press(ui_kb, keycode)
+                            key_states.add(keycode)
+                            actions.append(f"{key_name(keycode)} Pressed")
+                    elif keycode in key_states:
+                        release(ui_kb, keycode)
+                        key_states.remove(keycode)
+                        actions.append(f"{key_name(keycode)} Released")
 
-            # Handle modifiers
-            for bit, keycode in MOD_BITS_TO_EVKEY.items():
-                if modifiers & (1 << bit):
-                    current_modifiers.add(keycode)
-                    if keycode not in key_states:
-                        press(ui_kb, keycode)
-                        key_states.add(keycode)
-                        actions.append(f"{key_name(keycode)} Pressed")
-                elif keycode in key_states:
-                    release(ui_kb, keycode)
-                    key_states.remove(keycode)
-                    actions.append(f"{key_name(keycode)} Released")
+            # Release keys no longer pressed
+            for keycode in list(key_states):
+                # Filter to normal keys (not modifiers, to avoid double-release)
+                if keycode in USAGE_TO_EVKEY.values():  # assuming modifiers are separate in MOD_BITS_TO_EVKEY
+                    usage = next((u for u, e in USAGE_TO_EVKEY.items() if e == keycode), None)
+                    if usage not in pressed_usages:
+                        release(ui_kb, keycode)
+                        key_states.remove(keycode)
+                        if keycode in key_press_times:
+                            del key_press_times[keycode]
+                        actions.append(f"{key_name(keycode)} Released")
+                        cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
+                        commands_to_execute.extend(cmds)
 
-            # Handle normal keys
-            for key in pressed_keys:
-                keycode = USAGE_TO_EVKEY.get(key)
+            # Press new keys
+            for usage in pressed_usages:
+                keycode = USAGE_TO_EVKEY.get(usage)
                 if keycode:
-                    current_time = time.time()
                     if keycode not in key_states:
                         press(ui_kb, keycode)
                         key_states.add(keycode)
                         key_press_times[keycode] = current_time
                         actions.append(f"{key_name(keycode)} Pressed")
                 else:
-                    actions.append(f"Unknown key usage 0x{key:02x}")
-
-            # Release keys no longer pressed
-            for keycode in list(key_states):
-                if keycode in USAGE_TO_EVKEY.values() and keycode not in {USAGE_TO_EVKEY.get(k) for k in pressed_keys}:
-                    release(ui_kb, keycode)
-                    key_states.remove(keycode)
-                    actions.append(f"{key_name(keycode)} Released")
-
-                    cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
-                    commands_to_execute.extend(cmds)
-        else:
-            actions.append("Keyboard report too short")
+                    actions.append(f"Unknown keyboard usage 0x{usage:02x}")
 
     # ───────────────────────────────────────────────────────────────
     # System control (power/sleep/wake usually 1 byte bitfield)
