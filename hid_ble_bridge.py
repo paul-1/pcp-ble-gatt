@@ -187,8 +187,7 @@ def parse_triggers_file(filepath: str) -> list:
 def parse_remapping_file(filepath: str) -> dict:
     """
     Parse key remapping configuration file.
-    Format: <source key name> <destination key name>
-    (separated by whitespace - spaces or tabs)
+    Format: <source key name>:<destination key name>
     
     Returns dict mapping source keycode to destination keycode.
     
@@ -204,13 +203,13 @@ def parse_remapping_file(filepath: str) -> dict:
                 if not line or line.startswith('#'):
                     continue
                 
-                # Split on whitespace, expecting exactly 2 parts
-                parts = line.split()
+                # Split on colon, expecting exactly 2 parts
+                parts = line.split(':')
                 if len(parts) != 2:
                     printlog(f"Warning: Invalid remapping line {line_num}: {line}")
                     continue
                 
-                source_key_name, dest_key_name = parts
+                source_key_name, dest_key_name = parts[0].strip(), parts[1].strip()
                 
                 # Validate source key
                 source_keycode = NAME_TO_KEYCODE.get(source_key_name)
@@ -1074,7 +1073,7 @@ async def main():
     # Create mutually exclusive group for triggers and remapkeys
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
-    mode_group.add_argument("--remapkeys", type=str, help="Path to key remapping configuration file. Format: SOURCE_KEY DEST_KEY (one mapping per line).")
+    mode_group.add_argument("--remapkeys", type=str, help="Path to key remapping configuration file. Format: SOURCE_KEY:DEST_KEY (one mapping per line).")
     args = parser.parse_args()
 
     global stop_loop, debug, triggers, key_remappings, report_definitions, report_ids_present
