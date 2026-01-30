@@ -20,6 +20,7 @@ from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
 UUID_HID_SERVICE = "00001812-0000-1000-8000-00805f9b34fb"  # HID Service
 UUID_HID_REPORT = "00002a4d-0000-1000-8000-00805f9b34fb"   # HID Report
 UUID_HID_REPORT_MAP = "00002a4b-0000-1000-8000-00805f9b34fb"   # HID Report Map
+REPORT_REFERENCE_UUID = "00002908-0000-1000-8000-00805f9b34fb"   # Report Reference
 
 # Key Mappings for HID Usages
 USAGE_TO_EVKEY = {
@@ -674,7 +675,22 @@ def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
 def key_name(keycode: int) -> str:
     return KEYCODE_TO_NAME.get(keycode, f"KEY_{keycode}")
 
-async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes):
+async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes, 
+                                        explicit_report_type: str = None, explicit_size_bytes: int = None):
+    """
+    Decode HID report data and inject input events.
+    
+    Args:
+        ui_kb: keyboard uinput device
+        ui_mouse: mouse uinput device
+        source: source identifier for tracking state
+        data: raw HID report data
+        explicit_report_type: explicit report type from report map (e.g., "keyboard", "mouse", "consumer")
+        explicit_size_bytes: expected size in bytes from report map (reserved for future validation/verification)
+    
+    Note: explicit_size_bytes is currently reserved for future use. It could be used to validate
+    incoming data length or warn about mismatches, but for now we rely on the report type alone.
+    """
     global key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers
     global key_press_times, media_press_times, system_press_times
     global observed_mouse_lengths
@@ -682,30 +698,31 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     actions = []
     commands_to_execute = []
     report_id = None
-    report_type = None
+    report_type = explicit_report_type  # Use explicit type if provided
     payload = data
     id_included = False
-    resolve_reason = "none"
+    resolve_reason = "explicit" if explicit_report_type else "none"
 
-    # Try to resolve using report map / descriptor parser
-    resolved = resolve_report_definition(data)
-    if resolved:
-        report_id, definition, payload, id_included, resolve_reason = resolved
-        report_type = definition["type"]
-
-    # Fallback heuristics if descriptor didn't resolve or is missing
+    # Only use fallback heuristics if explicit type is not provided
     if report_type is None:
-        data_len = len(data)
-        if data_len in (2, 3):
-            report_type = "consumer"
-        elif data_len in (8, 9):           # common keyboard sizes (8 + reserved/padding)
-            report_type = "keyboard"
-        elif data_len == 1:
-            report_type = "system"
-        elif data_len in (4, 5, 6, 7):     # mouse common sizes
-            report_type = "mouse"
+        # Try to resolve using report map / descriptor parser
+        resolved = resolve_report_definition(data)
+        if resolved:
+            report_id, definition, payload, id_included, resolve_reason = resolved
+            report_type = definition["type"]
         else:
-            report_type = "unknown"
+            # Fallback heuristics if descriptor didn't resolve or is missing
+            data_len = len(data)
+            if data_len in (2, 3):
+                report_type = "consumer"
+            elif data_len in (8, 9):           # common keyboard sizes (8 + reserved/padding)
+                report_type = "keyboard"
+            elif data_len == 1:
+                report_type = "system"
+            elif data_len in (4, 5, 6, 7):     # mouse common sizes
+                report_type = "mouse"
+            else:
+                report_type = "unknown"
 
     # ───────────────────────────────────────────────────────────────
     # Mouse report – dynamic length + standard field parsing
@@ -797,54 +814,84 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         else:
             actions.append("Consumer report too short")
 
-    # ───────────────────────────────────────────────────────────────
-    # Keyboard report (usually 8 bytes, sometimes 9 with reserved)
-    # ───────────────────────────────────────────────────────────────
+# Flexible keyboard report handler
+    # Supports:
+    # - 6 bytes: pure key array (no modifiers/reserved) — like your device's Report ID 2
+    # - 8 bytes: modifiers + reserved (ignored) + 6 keys — standard boot keyboard
+    # - 9 bytes: Report ID + modifiers + reserved + 6 keys — if ID prepended
+    # Assumes USAGE_TO_EVKEY maps HID usage (0x04–0xA4 etc.) to evdev keycodes
     elif report_type == "keyboard":
-        if len(payload) >= 8:
-            modifiers = payload[0]
-            # payload[1] usually reserved/0 — ignore
-            pressed_keys = {k for k in payload[2:8] if k != 0}
+        # First, check and optionally strip Report ID if present (assuming it's the first byte)
+        report_id = None
+        if len(payload) == 9:
+            report_id = payload[0]  # e.g., 0x02 for keyboard
+            payload = payload[1:]   # now treat as 8-byte
 
+
+        if len(payload) not in (6, 8):
+            actions.append(f"Keyboard report unexpected length {len(payload)} (expected 6,8,9)")
+        else:
+            # Now payload is either 6 or 8 bytes
+            modifiers_byte = 0  # default to no modifiers
+            reserved_offset = 0
+            keys_start = 0
+            num_keys = 6
+
+            if len(payload) == 8:
+                # Standard: modifiers (0) + reserved (1) + keys (2:8)
+                modifiers_byte = payload[0]
+                reserved_offset = 1  # ignore payload[1]
+                keys_start = 2
+            elif len(payload) == 6:
+                # Minimal: keys (0:6)
+                keys_start = 0
+            # else: already checked
+
+            # Extract pressed usages (HID key codes, non-zero)
+            pressed_usages = {k for k in payload[keys_start:keys_start + num_keys] if k != 0}
+
+            current_time = time.time()
+
+            # Handle modifiers if present
             current_modifiers.clear()
+            if len(payload) >= 8:  # only for formats with modifiers
+                for bit, keycode in MOD_BITS_TO_EVKEY.items():
+                    if modifiers_byte & (1 << bit):
+                        current_modifiers.add(keycode)
+                        if keycode not in key_states:
+                            press(ui_kb, keycode)
+                            key_states.add(keycode)
+                            actions.append(f"{key_name(keycode)} Pressed")
+                    elif keycode in key_states:
+                        release(ui_kb, keycode)
+                        key_states.remove(keycode)
+                        actions.append(f"{key_name(keycode)} Released")
 
-            # Handle modifiers
-            for bit, keycode in MOD_BITS_TO_EVKEY.items():
-                if modifiers & (1 << bit):
-                    current_modifiers.add(keycode)
-                    if keycode not in key_states:
-                        press(ui_kb, keycode)
-                        key_states.add(keycode)
-                        actions.append(f"{key_name(keycode)} Pressed")
-                elif keycode in key_states:
-                    release(ui_kb, keycode)
-                    key_states.remove(keycode)
-                    actions.append(f"{key_name(keycode)} Released")
+            # Release keys no longer pressed
+            for keycode in list(key_states):
+                # Filter to normal keys (not modifiers, to avoid double-release)
+                if keycode in USAGE_TO_EVKEY.values():  # assuming modifiers are separate in MOD_BITS_TO_EVKEY
+                    usage = next((u for u, e in USAGE_TO_EVKEY.items() if e == keycode), None)
+                    if usage not in pressed_usages:
+                        release(ui_kb, keycode)
+                        key_states.remove(keycode)
+                        if keycode in key_press_times:
+                            del key_press_times[keycode]
+                        actions.append(f"{key_name(keycode)} Released")
+                        cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
+                        commands_to_execute.extend(cmds)
 
-            # Handle normal keys
-            for key in pressed_keys:
-                keycode = USAGE_TO_EVKEY.get(key)
+            # Press new keys
+            for usage in pressed_usages:
+                keycode = USAGE_TO_EVKEY.get(usage)
                 if keycode:
-                    current_time = time.time()
                     if keycode not in key_states:
                         press(ui_kb, keycode)
                         key_states.add(keycode)
                         key_press_times[keycode] = current_time
                         actions.append(f"{key_name(keycode)} Pressed")
                 else:
-                    actions.append(f"Unknown key usage 0x{key:02x}")
-
-            # Release keys no longer pressed
-            for keycode in list(key_states):
-                if keycode in USAGE_TO_EVKEY.values() and keycode not in {USAGE_TO_EVKEY.get(k) for k in pressed_keys}:
-                    release(ui_kb, keycode)
-                    key_states.remove(keycode)
-                    actions.append(f"{key_name(keycode)} Released")
-
-                    cmds = await handle_key_release_triggers(keycode, key_press_times, current_modifiers, actions)
-                    commands_to_execute.extend(cmds)
-        else:
-            actions.append("Keyboard report too short")
+                    actions.append(f"Unknown keyboard usage 0x{usage:02x}")
 
     # ───────────────────────────────────────────────────────────────
     # System control (power/sleep/wake usually 1 byte bitfield)
@@ -884,13 +931,32 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     for command in commands_to_execute:
         await execute_trigger_command(command)
 
-async def notification_handler(client: BleakClient, handle: int, ui_kb: UInput, ui_mouse: UInput):
+async def notification_handler(client: BleakClient, report_info: dict, ui_kb: UInput, ui_mouse: UInput):
+    """
+    Handle notifications for a specific HID report.
+    
+    Args:
+        client: BLE client
+        report_info: Dictionary containing:
+            - handle: characteristic handle
+            - report_id: report ID
+            - report_type: report type ("keyboard", "mouse", "consumer", etc.) or None
+            - size_bytes: expected size in bytes or None
+        ui_kb: keyboard uinput device
+        ui_mouse: mouse uinput device
+    """
+    handle = report_info["handle"]
+    report_type = report_info.get("report_type")
+    size_bytes = report_info.get("size_bytes")
+    
     try:
         await client.start_notify(
             handle,
-            lambda _, data: asyncio.create_task(decode_hid_report_and_inject(ui_kb, ui_mouse, f"HID-{handle}", data)),
+            lambda _, data: asyncio.create_task(
+                decode_hid_report_and_inject(ui_kb, ui_mouse, f"HID-{handle}", data, report_type, size_bytes)
+            ),
         )
-        printlog(f"Started notifications for HID report (handle={handle}).")
+        printlog(f"Started notifications for HID report (handle={handle}, type={report_type}, size={size_bytes}).")
         while True:
             await asyncio.sleep(1)
     except asyncio.CancelledError:
@@ -1045,12 +1111,55 @@ async def main():
                 report_ids_present = False
                 printlog(f"Failed to read/parse Report Map: {err}")
 
-            hid_reports = [
-                char for svc in client.services if svc.uuid == UUID_HID_SERVICE
-                for char in svc.characteristics if char.uuid == UUID_HID_REPORT and "notify" in char.properties
-            ]
-            for char in hid_reports:
-                task = asyncio.create_task(notification_handler(client, char.handle, ui_kb, ui_mouse))
+            # Build comprehensive report info list that ties report IDs to handles
+            report_info_list = []
+            report_chars = []
+            for service in client.services:
+                for char in service.characteristics:
+                    if char.uuid == UUID_HID_REPORT:
+                        report_chars.append(char)
+
+            for char in report_chars:
+                # Read Report Reference descriptor to get report ID and type
+                ref_desc = char.get_descriptor(REPORT_REFERENCE_UUID)
+                if ref_desc:
+                    try:
+                        ref_value = await client.read_gatt_descriptor(ref_desc.handle)
+                        report_id = ref_value[0]
+                        report_type_val = ref_value[1]  # 1=Input, 2=Output, 3=Feature
+                        
+                        # Only process input reports that support notifications
+                        if report_type_val == 1 and "notify" in char.properties:
+                            # Generate type string for logging (refactored to avoid duplication)
+                            type_str = {1: "Input", 2: "Output", 3: "Feature"}.get(report_type_val, f"Unknown({report_type_val})")
+                            
+                            # Get report definition from parsed report map
+                            if report_id in report_definitions:
+                                definition = report_definitions[report_id]
+                                report_info = {
+                                    "handle": char.handle,
+                                    "report_id": report_id,
+                                    "report_type": definition["type"],  # "keyboard", "mouse", "consumer", etc.
+                                    "size_bytes": definition["size_bytes"]
+                                }
+                                report_info_list.append(report_info)
+                                printlog(f"   Report ID {report_id} ({type_str}, {definition['type']}) handle={char.handle}, size={definition['size_bytes']} bytes")
+                            else:
+                                # No definition from report map, create basic info
+                                report_info = {
+                                    "handle": char.handle,
+                                    "report_id": report_id,
+                                    "report_type": None,  # Will use heuristics
+                                    "size_bytes": None
+                                }
+                                report_info_list.append(report_info)
+                                printlog(f"   Report ID {report_id} ({type_str}) handle={char.handle}, size=unknown")
+                    except Exception as err:
+                        printlog(f"Failed to read Report Reference for handle {char.handle}: {err}")
+
+            # Create notification handlers with report info
+            for report_info in report_info_list:
+                task = asyncio.create_task(notification_handler(client, report_info, ui_kb, ui_mouse))
                 notification_tasks.append(task)
 
             printlog("Waiting for input events. Press Ctrl+C to quit.")
