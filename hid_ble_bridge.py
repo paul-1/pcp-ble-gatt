@@ -926,7 +926,9 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
     payload_hex = payload.hex() if payload is not None else ""
     action_str = "; ".join(actions) if actions else "No mapped actions"
 
-    printlog(f"[{source}] Report type={report_type} payload={payload_hex} {action_str}")
+    #If there are no actions and the payload is 0 (No key Pressed, just skip the logging)
+    if actions or payload_hex.strip("0") != "":
+        printlog(f"[{source}] Report type={report_type} payload={payload_hex} {action_str}")
 
     for command in commands_to_execute:
         await execute_trigger_command(command)
