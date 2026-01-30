@@ -187,7 +187,8 @@ def parse_triggers_file(filepath: str) -> list:
 def parse_remapping_file(filepath: str) -> dict:
     """
     Parse key remapping configuration file.
-    Format: <source key name>	<destination key name>
+    Format: <source key name> <destination key name>
+    (separated by whitespace - spaces or tabs)
     
     Returns dict mapping source keycode to destination keycode.
     

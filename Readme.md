@@ -185,8 +185,10 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --remapkeys /pa
 
 The remapping configuration file follows a simple format with one mapping per line:
 ```
-<source key name>	<destination key name>
+<source key name> <destination key name>
 ```
+
+Separate the two key names with whitespace (spaces or tabs).
 
 Where:
 - `<source key name>`: The key name sent by the Bluetooth device (e.g., `KEY_VOLUMEUP`, `KEY_NEXTSONG`)
