@@ -1151,6 +1151,12 @@ async def main():
         printlog("Triggers-only mode: uinput devices not created")
     else:
         kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values()) | set(SYSTEM_BITS_TO_EVKEY.values())}
+        
+        # Add remapped destination keys to capabilities
+        if key_remappings:
+            kb_capabilities[e.EV_KEY] |= set(key_remappings.values())
+            printlog(f"Added {len(key_remappings)} remapped key(s) to keyboard capabilities")
+        
         mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
         
         ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
