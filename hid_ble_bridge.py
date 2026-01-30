@@ -130,6 +130,12 @@ def printlog(data):
 triggers = []  # List of (event_keys, event_value, command) tuples
 MAX_LOG_COMMAND_LENGTH = 50  # Maximum length of command to log (for security)
 
+# ==============================================================================
+# Key remapping configuration handling
+# ==============================================================================
+
+key_remappings = {}  # Dictionary mapping source keycode to destination keycode
+
 def parse_triggers_file(filepath: str) -> list:
     """
     Parse triggerhappy-style configuration file.
@@ -177,6 +183,53 @@ def parse_triggers_file(filepath: str) -> list:
         printlog(f"Error reading trigger file {filepath}: {e}")
     
     return parsed_triggers
+
+def parse_remapping_file(filepath: str) -> dict:
+    """
+    Parse key remapping configuration file.
+    Format: <source key name>	<destination key name>
+    
+    Returns dict mapping source keycode to destination keycode.
+    
+    Note: Caller should verify file exists before calling this function.
+    """
+    remappings = {}
+    
+    try:
+        with open(filepath, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Split on whitespace, expecting exactly 2 parts
+                parts = line.split()
+                if len(parts) != 2:
+                    printlog(f"Warning: Invalid remapping line {line_num}: {line}")
+                    continue
+                
+                source_key_name, dest_key_name = parts
+                
+                # Validate source key
+                source_keycode = NAME_TO_KEYCODE.get(source_key_name)
+                if source_keycode is None:
+                    printlog(f"Warning: Unknown source key name '{source_key_name}' on line {line_num}")
+                    continue
+                
+                # Validate destination key
+                dest_keycode = NAME_TO_KEYCODE.get(dest_key_name)
+                if dest_keycode is None:
+                    printlog(f"Warning: Unknown destination key name '{dest_key_name}' on line {line_num}")
+                    continue
+                
+                remappings[source_keycode] = dest_keycode
+                printlog(f"Loaded remapping: {source_key_name} -> {dest_key_name}")
+    
+    except Exception as e:
+        printlog(f"Error reading remapping file {filepath}: {e}")
+    
+    return remappings
 
 def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
     """
@@ -647,13 +700,17 @@ def resolve_report_definition(data: bytes):
 
 def press(ui: UInput, keycode: int):
     if ui is not None:
-        ui.write(e.EV_KEY, keycode, 1)
+        # Apply key remapping if configured
+        remapped_keycode = key_remappings.get(keycode, keycode)
+        ui.write(e.EV_KEY, remapped_keycode, 1)
         ui.syn()
 
 
 def release(ui: UInput, keycode: int):
     if ui is not None:
-        ui.write(e.EV_KEY, keycode, 0)
+        # Apply key remapping if configured
+        remapped_keycode = key_remappings.get(keycode, keycode)
+        ui.write(e.EV_KEY, remapped_keycode, 0)
         ui.syn()
 
 
@@ -1012,10 +1069,14 @@ async def main():
     group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
     parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
     parser.add_argument("--debug", action="store_true", help="Enable messages on console")
-    parser.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
+    
+    # Create mutually exclusive group for triggers and remapkeys
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
+    mode_group.add_argument("--remapkeys", type=str, help="Path to key remapping configuration file. Format: SOURCE_KEY DEST_KEY (one mapping per line).")
     args = parser.parse_args()
 
-    global stop_loop, debug, triggers, report_definitions, report_ids_present
+    global stop_loop, debug, triggers, key_remappings, report_definitions, report_ids_present
 
     if args.debug:
         debug = True
@@ -1028,6 +1089,15 @@ async def main():
         else:
             printlog(f"Warning: Trigger file not found: {args.triggers}")
             printlog("Continuing without trigger handling...")
+    
+    # Load key remapping configuration if specified
+    if args.remapkeys:
+        if os.path.isfile(args.remapkeys):
+            key_remappings = parse_remapping_file(args.remapkeys)
+            printlog(f"Loaded {len(key_remappings)} key remapping(s) from {args.remapkeys}")
+        else:
+            printlog(f"Warning: Remapping file not found: {args.remapkeys}")
+            printlog("Continuing without key remapping...")
 
     while True:
         info = get_controller_power()
