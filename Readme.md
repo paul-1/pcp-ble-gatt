@@ -7,6 +7,7 @@ A Python application that bridges Bluetooth Low Energy (BLE) HID devices (keyboa
 - **BLE Connection**: Connects to BLE HID devices via MAC address or device name.
 - **Virtual Devices**: Creates virtual keyboard and mouse devices using `/dev/uinput`.
 - **Key Handling**: Supports standard keyboard keys, modifiers, media keys, and mouse movements/clicks.
+- **Key Remapping**: Remap keys from the Bluetooth device to different keys on the virtual device.
 - **Device Preparation**: Automatically handles pairing, bonding, and trust management via `bluetoothctl`.
 - **Robust Reconnection**: Automatically attempts reconnection on disconnection.
 - **Built-in Trigger Support**: Direct command execution on key events without external dependencies.
@@ -162,6 +163,52 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --debug
 ### Additional Options
 - `--scan-timeout <seconds>`: Timeout for device scanning by name (default: 10.0)
 - `--triggers <path>`: Path to trigger configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events.
+- `--remapkeys <path>`: Path to key remapping configuration file. Allows remapping keys from the Bluetooth device to different keys. **Cannot be used together with --triggers**.
+
+---
+
+### Key Remapping Configuration
+
+The application supports remapping keys from the Bluetooth device to different keys on the virtual input device. This is useful when your Bluetooth device sends keys that you want to map to different keys.
+
+**Note**: The `--remapkeys` option cannot be used together with `--triggers` option. Choose one or the other based on your needs.
+
+#### Enabling Key Remapping
+
+Use the `--remapkeys` option to specify a remapping configuration file:
+
+```ash
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --remapkeys /path/to/remap.conf
+```
+
+#### Key Remapping Configuration Format
+
+The remapping configuration file follows a simple format with one mapping per line:
+```
+<source key name>	<destination key name>
+```
+
+Where:
+- `<source key name>`: The key name sent by the Bluetooth device (e.g., `KEY_VOLUMEUP`, `KEY_NEXTSONG`)
+- `<destination key name>`: The key name you want to emit instead (e.g., `KEY_UP`, `KEY_RIGHT`)
+
+Example `remap.conf`:
+```
+# Remap volume keys to arrow keys
+KEY_VOLUMEUP KEY_UP
+KEY_VOLUMEDOWN KEY_DOWN
+
+# Remap media keys to arrow keys
+KEY_NEXTSONG KEY_RIGHT
+KEY_PREVIOUSSONG KEY_LEFT
+
+# Remap play/pause to Enter
+KEY_PLAYPAUSE KEY_ENTER
+```
+
+Lines starting with `#` are treated as comments and are ignored. Empty lines are also ignored.
+
+**Key names**: Use standard Linux input event key names (e.g., `KEY_A`, `KEY_ENTER`, `KEY_VOLUMEUP`, `KEY_PLAYPAUSE`). You can find a list of available key names in the evdev documentation or by examining the `ecodes` module in Python's evdev library.
 
 ---
 
