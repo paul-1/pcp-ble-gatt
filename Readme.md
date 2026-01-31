@@ -185,12 +185,16 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --remapkeys /pa
 
 The remapping configuration file follows a simple format with one mapping per line:
 ```
-<source key name>:<destination key name>:<key_held>
+<source key name>:<destination spec>:<key_held>
 ```
 
 Where:
 - `<source key name>`: The key name sent by the Bluetooth device (e.g., `KEY_VOLUMEUP`, `KEY_NEXTSONG`)
-- `<destination key name>`: The key name you want to emit instead (e.g., `KEY_UP`, `KEY_RIGHT`)
+- `<destination spec>`: The key or key combination you want to emit instead:
+  - Simple key: `KEY_UP`, `KEY_RIGHT`
+  - Key with modifiers: `SHIFT+KEY_C`, `CTRL+ALT+KEY_F`
+  - Modifiers can be: `SHIFT`, `CTRL`, `ALT`, `META`, `CONTROL` (defaults to LEFT variants)
+  - Or use full names: `LEFTSHIFT`, `RIGHTSHIFT`, `LEFTCTRL`, `RIGHTCTRL`, etc.
 - `<key_held>`: Behavior mode (0, 1, or 2):
   - **0**: Pass-through mode - send press and release events as they occur in real-time
   - **1**: Send momentary press+release when the key is released after being held for **less than 0.5 seconds**
@@ -200,6 +204,7 @@ Where:
 - If `key_held=0` is defined for a source key, you cannot also define `key_held=1` or `key_held=2` for that same key
 - You can define both `key_held=1` and `key_held=2` for the same source key (similar to triggers), allowing different actions based on hold duration
 - For `key_held=1` and `key_held=2`, the remapped key is sent as a momentary press immediately followed by a release (regardless of how long the original key was held)
+- When using modifiers in the destination spec, they are pressed before the main key and released after it
 
 Example `remap.conf`:
 ```
@@ -217,6 +222,16 @@ KEY_PREVIOUSSONG:KEY_LEFT:0
 # Play/pause with short/long press behavior
 KEY_PLAYPAUSE:KEY_SPACE:1       # Short press sends SPACE
 KEY_PLAYPAUSE:KEY_ENTER:2       # Long press sends ENTER
+
+# Remapping with modifiers (new feature)
+KEY_F1:SHIFT+KEY_A:0            # F1 sends Shift+A in real-time
+KEY_F2:CTRL+KEY_C:1             # F2 short press sends Ctrl+C (copy)
+KEY_F2:CTRL+KEY_V:2             # F2 long press sends Ctrl+V (paste)
+KEY_F3:CTRL+ALT+KEY_DELETE:0    # F3 sends Ctrl+Alt+Delete
+
+# Browser navigation using media keys
+KEY_NEXTSONG:CTRL+KEY_PAGEDOWN:0      # Next song -> Ctrl+PageDown (next tab)
+KEY_PREVIOUSSONG:CTRL+KEY_PAGEUP:0    # Previous song -> Ctrl+PageUp (previous tab)
 ```
 
 Lines starting with `#` are treated as comments and are ignored. Empty lines are also ignored.
