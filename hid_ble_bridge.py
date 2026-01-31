@@ -261,7 +261,7 @@ def parse_remapping_file(filepath: str) -> dict:
                         continue
                     
                     # Validate and collect modifiers
-                    for i, mod_name_orig in enumerate(modifier_names):
+                    for mod_name_orig in modifier_names:
                         mod_name = mod_name_orig
                         # Try direct lookup first
                         mod_keycode = NAME_TO_KEYCODE.get(mod_name)
@@ -316,8 +316,14 @@ def parse_remapping_file(filepath: str) -> dict:
                 # Use tuple of (source_keycode, key_held) as key to allow multiple definitions per source key
                 remappings[(source_keycode, key_held)] = (dest_keycode, dest_modifiers)
                 
-                mod_str = '+'.join([KEYCODE_TO_NAME.get(m, f"mod_{m}") for m in sorted(dest_modifiers)]) + '+' if dest_modifiers else ''
-                printlog(f"Loaded remapping: {source_key_name} -> {mod_str}{KEYCODE_TO_NAME.get(dest_keycode, f'key_{dest_keycode}')} (key_held={key_held})")
+                # Build readable log message
+                dest_key_name = KEYCODE_TO_NAME.get(dest_keycode, f'key_{dest_keycode}')
+                if dest_modifiers:
+                    mod_names = [KEYCODE_TO_NAME.get(m, f"mod_{m}") for m in sorted(dest_modifiers)]
+                    dest_spec_str = '+'.join(mod_names) + '+' + dest_key_name
+                else:
+                    dest_spec_str = dest_key_name
+                printlog(f"Loaded remapping: {source_key_name} -> {dest_spec_str} (key_held={key_held})")
     
     except Exception as e:
         printlog(f"Error reading remapping file {filepath}: {e}")
