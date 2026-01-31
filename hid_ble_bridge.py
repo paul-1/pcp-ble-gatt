@@ -130,6 +130,13 @@ def printlog(data):
 triggers = []  # List of (event_keys, event_value, command) tuples
 MAX_LOG_COMMAND_LENGTH = 50  # Maximum length of command to log (for security)
 
+# ==============================================================================
+# Key remapping configuration handling
+# ==============================================================================
+
+key_remappings = {}  # Dictionary mapping source keycode to (destination keycode, key_held_value) tuple
+remapped_key_press_times = {}  # Track press times for remapped keys that have hold-time behavior
+
 def parse_triggers_file(filepath: str) -> list:
     """
     Parse triggerhappy-style configuration file.
@@ -177,6 +184,94 @@ def parse_triggers_file(filepath: str) -> list:
         printlog(f"Error reading trigger file {filepath}: {e}")
     
     return parsed_triggers
+
+def parse_remapping_file(filepath: str) -> dict:
+    """
+    Parse key remapping configuration file.
+    Format: <source key name>:<destination key name>:<key_held>
+    
+    Where key_held is:
+    - 0: Pass-through mode - send press/release as they occur
+    - 1: Send momentary press+release on key release if held < 0.5s
+    - 2: Send momentary press+release on key release if held >= 0.5s
+    
+    Returns dict mapping source keycode to (destination keycode, key_held) tuple.
+    
+    Note: Caller should verify file exists before calling this function.
+    """
+    remappings = {}
+    # Track which source keys have which key_held values defined
+    source_key_definitions = {}
+    
+    try:
+        with open(filepath, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Split on colon, expecting exactly 3 parts
+                parts = line.split(':')
+                if len(parts) != 3:
+                    printlog(f"Warning: Invalid remapping line {line_num}: {line} (expected 3 colon-separated fields)")
+                    continue
+                
+                source_key_name, dest_key_name, key_held_str = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                
+                # Validate source key
+                source_keycode = NAME_TO_KEYCODE.get(source_key_name)
+                if source_keycode is None:
+                    printlog(f"Warning: Unknown source key name '{source_key_name}' on line {line_num}")
+                    continue
+                
+                # Validate destination key
+                dest_keycode = NAME_TO_KEYCODE.get(dest_key_name)
+                if dest_keycode is None:
+                    printlog(f"Warning: Unknown destination key name '{dest_key_name}' on line {line_num}")
+                    continue
+                
+                # Validate key_held value
+                try:
+                    key_held = int(key_held_str)
+                    if key_held not in (0, 1, 2):
+                        printlog(f"Warning: Invalid key_held value '{key_held_str}' on line {line_num} (must be 0, 1, or 2)")
+                        continue
+                except ValueError:
+                    printlog(f"Warning: Invalid key_held value '{key_held_str}' on line {line_num} (must be integer 0, 1, or 2)")
+                    continue
+                
+                # Track definitions for validation
+                if source_keycode not in source_key_definitions:
+                    source_key_definitions[source_keycode] = set()
+                source_key_definitions[source_keycode].add(key_held)
+                
+                # Store the mapping with tuple (dest_keycode, key_held)
+                # Use tuple of (source_keycode, key_held) as key to allow multiple definitions per source key
+                remappings[(source_keycode, key_held)] = dest_keycode
+                printlog(f"Loaded remapping: {source_key_name} -> {dest_key_name} (key_held={key_held})")
+    
+    except Exception as e:
+        printlog(f"Error reading remapping file {filepath}: {e}")
+    
+    # Validate that if key_held 0 is defined, no 1 or 2 can be defined
+    # Filter out invalid combinations
+    valid_remappings = {}
+    for source_keycode, key_held_values in source_key_definitions.items():
+        if 0 in key_held_values and len(key_held_values) > 1:
+            key_name_str = KEYCODE_TO_NAME.get(source_keycode, f"keycode_{source_keycode}")
+            printlog(f"Error: Key {key_name_str} has key_held=0 defined along with other values. Ignoring all definitions for this key.")
+            # Remove all mappings for this source key
+            for kh in key_held_values:
+                if (source_keycode, kh) in remappings:
+                    del remappings[(source_keycode, kh)]
+        else:
+            # Valid configuration - keep these mappings
+            for kh in key_held_values:
+                if (source_keycode, kh) in remappings:
+                    valid_remappings[(source_keycode, kh)] = remappings[(source_keycode, kh)]
+    
+    return valid_remappings
 
 def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
     """
@@ -645,16 +740,64 @@ def resolve_report_definition(data: bytes):
 # HID handling functions with enhanced logging
 # ==============================================================================
 
-def press(ui: UInput, keycode: int):
+def send_momentary_key(ui: UInput, keycode: int):
+    """
+    Send a momentary key press followed immediately by a release.
+    Used for hold-time-based remapping with KEY_HELD=1 or 2.
+    """
     if ui is not None:
         ui.write(e.EV_KEY, keycode, 1)
         ui.syn()
+        ui.write(e.EV_KEY, keycode, 0)
+        ui.syn()
+
+
+def press(ui: UInput, keycode: int):
+    if ui is not None:
+        # Check if this key has remapping with key_held=0 (pass-through mode)
+        if (keycode, 0) in key_remappings:
+            remapped_keycode = key_remappings[(keycode, 0)]
+            ui.write(e.EV_KEY, remapped_keycode, 1)
+            ui.syn()
+        # Check if key has hold-time-based remapping (key_held=1 or 2)
+        elif (keycode, 1) in key_remappings or (keycode, 2) in key_remappings:
+            # Track press time but don't inject yet - wait for release
+            remapped_key_press_times[keycode] = time.time()
+        else:
+            # No remapping, send as-is
+            ui.write(e.EV_KEY, keycode, 1)
+            ui.syn()
 
 
 def release(ui: UInput, keycode: int):
     if ui is not None:
-        ui.write(e.EV_KEY, keycode, 0)
-        ui.syn()
+        # Check if this key has remapping with key_held=0 (pass-through mode)
+        if (keycode, 0) in key_remappings:
+            remapped_keycode = key_remappings[(keycode, 0)]
+            ui.write(e.EV_KEY, remapped_keycode, 0)
+            ui.syn()
+        # Check if key has hold-time-based remapping
+        elif keycode in remapped_key_press_times:
+            press_time = remapped_key_press_times[keycode]
+            current_time = time.time()
+            hold_duration = current_time - press_time
+            del remapped_key_press_times[keycode]
+            
+            # Determine which key_held value to use based on hold duration
+            if hold_duration >= MIN_HOLD_DURATION:
+                # Held >= 0.5s, use key_held=2
+                if (keycode, 2) in key_remappings:
+                    remapped_keycode = key_remappings[(keycode, 2)]
+                    send_momentary_key(ui, remapped_keycode)
+            else:
+                # Held < 0.5s, use key_held=1
+                if (keycode, 1) in key_remappings:
+                    remapped_keycode = key_remappings[(keycode, 1)]
+                    send_momentary_key(ui, remapped_keycode)
+        else:
+            # No remapping, send as-is
+            ui.write(e.EV_KEY, keycode, 0)
+            ui.syn()
 
 
 def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
@@ -1012,10 +1155,14 @@ async def main():
     group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
     parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
     parser.add_argument("--debug", action="store_true", help="Enable messages on console")
-    parser.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
+    
+    # Create mutually exclusive group for triggers and remapkeys
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
+    mode_group.add_argument("--remapkeys", type=str, help="Path to key remapping configuration file. Format: SOURCE_KEY:DEST_KEY:KEY_HELD (one mapping per line).")
     args = parser.parse_args()
 
-    global stop_loop, debug, triggers, report_definitions, report_ids_present
+    global stop_loop, debug, triggers, key_remappings, report_definitions, report_ids_present
 
     if args.debug:
         debug = True
@@ -1028,6 +1175,15 @@ async def main():
         else:
             printlog(f"Warning: Trigger file not found: {args.triggers}")
             printlog("Continuing without trigger handling...")
+    
+    # Load key remapping configuration if specified
+    if args.remapkeys:
+        if os.path.isfile(args.remapkeys):
+            key_remappings = parse_remapping_file(args.remapkeys)
+            printlog(f"Loaded {len(key_remappings)} key remapping(s) from {args.remapkeys}")
+        else:
+            printlog(f"Warning: Remapping file not found: {args.remapkeys}")
+            printlog("Continuing without key remapping...")
 
     while True:
         info = get_controller_power()
@@ -1081,6 +1237,14 @@ async def main():
         printlog("Triggers-only mode: uinput devices not created")
     else:
         kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values()) | set(SYSTEM_BITS_TO_EVKEY.values())}
+        
+        # Add remapped destination keys to capabilities
+        if key_remappings:
+            # key_remappings now maps (source_keycode, key_held) -> dest_keycode
+            dest_keycodes = set(key_remappings.values())
+            kb_capabilities[e.EV_KEY] |= dest_keycodes
+            printlog(f"Added {len(dest_keycodes)} remapped key(s) to keyboard capabilities")
+        
         mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
         
         ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
