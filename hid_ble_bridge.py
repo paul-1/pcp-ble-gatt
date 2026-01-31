@@ -113,7 +113,7 @@ report_ids_present = False  # set True if Report Map declares any Report IDs
 # Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
 MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
 
-observed_mouse_lengths = {}  # source → set of seen mouse payload lengths
+observed_mouse_lengths = {}  # source - set of seen mouse payload lengths
 MOUSE_MIN_MOVEMENT_THRESHOLD = 2  # ignore tiny/noise reports for length detection
 MIN_SAMPLES_FOR_CONFIDENCE = 3    # how many consistent lengths before locking in
 
@@ -566,7 +566,7 @@ def parse_hid_report_map(report_map: bytes) -> dict:
             "usage_pairs": set of tuples (usage_page, usage)
         }
     """
-    report_data = {}          # report_id → {"bits": int, "usages": set, "directions": set}
+    report_data = {}          # report_id - {"bits": int, "usages": set, "directions": set}
     report_ids_present = False
 
     # Parser state
@@ -891,33 +891,30 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         # Decide effective length for this report
         seen_lengths = observed_mouse_lengths[source]
         if len(seen_lengths) == 1 and min(seen_lengths) >= 4:
-            # Only one consistent length observed → trust it
+            # Only one consistent length observed - trust it
             effective_len = next(iter(seen_lengths))
         elif len(seen_lengths) >= MIN_SAMPLES_FOR_CONFIDENCE:
-            # Multiple observations → most common (handles occasional outliers)
+            # Multiple observations - most common (handles occasional outliers)
             from collections import Counter
             count = Counter(seen_lengths)
             effective_len = count.most_common(1)[0][0]
         else:
-            # Not confident yet → prefer observed if reasonable, else common fallback
+            # Not confident yet prefer observed if reasonable, else common fallback
             effective_len = current_len if current_len in (4, 5, 6) else 5
 
         # Parse fields using standard layout (descriptor-based offsets)
         buttons = payload[0] if effective_len >= 1 else 0
+        # Fix bad button data (Any button higher than all 3 buttons pushed)
+        buttons = 1 if payload[0] > 0x07 >= 3 else 0
 
         x_mov = int.from_bytes(payload[1:2], "little", signed=True) if effective_len >= 2 else 0
         y_mov = int.from_bytes(payload[2:3], "little", signed=True) if effective_len >= 3 else 0
         scroll = int.from_bytes(payload[3:4], "little", signed=True) if effective_len >= 4 else 0
 
-        # If effective_len > 4 → extra bytes are padding/reserved → ignore
+        # If effective_len > 4 - extra bytes are padding/reserved - ignore
 
         inject_mouse_event(ui_mouse, buttons, x_mov, y_mov, scroll)
 
-        # actions.append(
-            # f"Mouse (effective {effective_len}B) btn={buttons:02x} "
-            # f"x={x_mov:+3} y={y_mov:+3} wheel={scroll:+2} "
-            # f"(seen: {sorted(seen_lengths)})"
-        # )
         actions.append(
             f"btn={buttons:02x} "
             f"x={x_mov:+3} y={y_mov:+3} wheel={scroll:+2} "
