@@ -1309,14 +1309,7 @@ async def main():
                                 printlog(f"   Report ID {report_id} ({type_str}, {definition['type']}) handle={char.handle}, size={definition['size_bytes']} bytes")
                             else:
                                 # No definition from report map, create basic info
-                                report_info = {
-                                    "handle": char.handle,
-                                    "report_id": report_id,
-                                    "report_type": None,  # Will use heuristics
-                                    "size_bytes": None
-                                }
-                                report_info_list.append(report_info)
-                                printlog(f"   Report ID {report_id} ({type_str}) handle={char.handle}, size=unknown")
+                                printlog(f"   Report ID {report_id} handle={char.handle} skipped due to incomplete data")
                     except Exception as err:
                         printlog(f"Failed to read Report Reference for handle {char.handle}: {err}")
 
