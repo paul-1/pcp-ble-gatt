@@ -255,12 +255,23 @@ def parse_remapping_file(filepath: str) -> dict:
         printlog(f"Error reading remapping file {filepath}: {e}")
     
     # Validate that if key_held 0 is defined, no 1 or 2 can be defined
+    # Filter out invalid combinations
+    valid_remappings = {}
     for source_keycode, key_held_values in source_key_definitions.items():
         if 0 in key_held_values and len(key_held_values) > 1:
             key_name_str = KEYCODE_TO_NAME.get(source_keycode, f"keycode_{source_keycode}")
-            printlog(f"Warning: Key {key_name_str} has key_held=0 defined along with other values. key_held=0 cannot be combined with 1 or 2.")
+            printlog(f"Error: Key {key_name_str} has key_held=0 defined along with other values. Ignoring all definitions for this key.")
+            # Remove all mappings for this source key
+            for kh in key_held_values:
+                if (source_keycode, kh) in remappings:
+                    del remappings[(source_keycode, kh)]
+        else:
+            # Valid configuration - keep these mappings
+            for kh in key_held_values:
+                if (source_keycode, kh) in remappings:
+                    valid_remappings[(source_keycode, kh)] = remappings[(source_keycode, kh)]
     
-    return remappings
+    return valid_remappings
 
 def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
     """
