@@ -740,6 +740,18 @@ def resolve_report_definition(data: bytes):
 # HID handling functions with enhanced logging
 # ==============================================================================
 
+def send_momentary_key(ui: UInput, keycode: int):
+    """
+    Send a momentary key press followed immediately by a release.
+    Used for hold-time-based remapping with KEY_HELD=1 or 2.
+    """
+    if ui is not None:
+        ui.write(e.EV_KEY, keycode, 1)
+        ui.syn()
+        ui.write(e.EV_KEY, keycode, 0)
+        ui.syn()
+
+
 def press(ui: UInput, keycode: int):
     if ui is not None:
         # Check if this key has remapping with key_held=0 (pass-through mode)
@@ -776,20 +788,12 @@ def release(ui: UInput, keycode: int):
                 # Held >= 0.5s, use key_held=2
                 if (keycode, 2) in key_remappings:
                     remapped_keycode = key_remappings[(keycode, 2)]
-                    # Send momentary press + release
-                    ui.write(e.EV_KEY, remapped_keycode, 1)
-                    ui.syn()
-                    ui.write(e.EV_KEY, remapped_keycode, 0)
-                    ui.syn()
+                    send_momentary_key(ui, remapped_keycode)
             else:
                 # Held < 0.5s, use key_held=1
                 if (keycode, 1) in key_remappings:
                     remapped_keycode = key_remappings[(keycode, 1)]
-                    # Send momentary press + release
-                    ui.write(e.EV_KEY, remapped_keycode, 1)
-                    ui.syn()
-                    ui.write(e.EV_KEY, remapped_keycode, 0)
-                    ui.syn()
+                    send_momentary_key(ui, remapped_keycode)
         else:
             # No remapping, send as-is
             ui.write(e.EV_KEY, keycode, 0)
