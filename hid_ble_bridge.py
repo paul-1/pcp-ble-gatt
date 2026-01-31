@@ -134,8 +134,9 @@ MAX_LOG_COMMAND_LENGTH = 50  # Maximum length of command to log (for security)
 # Key remapping configuration handling
 # ==============================================================================
 
-key_remappings = {}  # Dictionary mapping source keycode to (destination keycode, key_held_value) tuple
+key_remappings = {}  # Dictionary mapping (source_keycode, key_held) to (destination keycode, set of modifier keycodes) tuple
 remapped_key_press_times = {}  # Track press times for remapped keys that have hold-time behavior
+remapped_active_modifiers = {}  # Track which modifiers are currently pressed for each remapped key in pass-through mode
 
 def parse_triggers_file(filepath: str) -> list:
     """
@@ -188,20 +189,32 @@ def parse_triggers_file(filepath: str) -> list:
 def parse_remapping_file(filepath: str) -> dict:
     """
     Parse key remapping configuration file.
-    Format: <source key name>:<destination key name>:<key_held>
+    Format: <source key name>:<destination spec>:<key_held>
     
-    Where key_held is:
-    - 0: Pass-through mode - send press/release as they occur
-    - 1: Send momentary press+release on key release if held < 0.5s
-    - 2: Send momentary press+release on key release if held >= 0.5s
+    Where:
+    - destination spec can be a simple key name (e.g., KEY_C) or 
+      modifiers+key (e.g., SHIFT+KEY_C or CTRL+ALT+KEY_C)
+    - key_held is:
+      - 0: Pass-through mode - send press/release as they occur
+      - 1: Send momentary press+release on key release if held < 0.5s
+      - 2: Send momentary press+release on key release if held >= 0.5s
     
-    Returns dict mapping source keycode to (destination keycode, key_held) tuple.
+    Returns dict mapping (source_keycode, key_held) to (destination keycode, set of modifier keycodes).
     
     Note: Caller should verify file exists before calling this function.
     """
     remappings = {}
     # Track which source keys have which key_held values defined
     source_key_definitions = {}
+    
+    # Build a set of valid modifier names from MOD_BITS_TO_EVKEY
+    valid_modifiers = set(MOD_BITS_TO_EVKEY.values())
+    # Also include the string names for convenience
+    valid_modifier_names = set()
+    for keycode in valid_modifiers:
+        key_name = KEYCODE_TO_NAME.get(keycode)
+        if key_name:
+            valid_modifier_names.add(key_name)
     
     try:
         with open(filepath, 'r') as f:
@@ -217,7 +230,7 @@ def parse_remapping_file(filepath: str) -> dict:
                     printlog(f"Warning: Invalid remapping line {line_num}: {line} (expected 3 colon-separated fields)")
                     continue
                 
-                source_key_name, dest_key_name, key_held_str = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                source_key_name, dest_spec, key_held_str = parts[0].strip(), parts[1].strip(), parts[2].strip()
                 
                 # Validate source key
                 source_keycode = NAME_TO_KEYCODE.get(source_key_name)
@@ -225,11 +238,64 @@ def parse_remapping_file(filepath: str) -> dict:
                     printlog(f"Warning: Unknown source key name '{source_key_name}' on line {line_num}")
                     continue
                 
-                # Validate destination key
-                dest_keycode = NAME_TO_KEYCODE.get(dest_key_name)
-                if dest_keycode is None:
-                    printlog(f"Warning: Unknown destination key name '{dest_key_name}' on line {line_num}")
-                    continue
+                # Parse destination spec - can be "KEY_C" or "SHIFT+KEY_C" or "CTRL+ALT+KEY_C"
+                dest_parts = dest_spec.split('+')
+                dest_modifiers = set()
+                dest_keycode = None
+                
+                if len(dest_parts) == 1:
+                    # Simple key without modifiers
+                    dest_keycode = NAME_TO_KEYCODE.get(dest_parts[0])
+                    if dest_keycode is None:
+                        printlog(f"Warning: Unknown destination key name '{dest_parts[0]}' on line {line_num}")
+                        continue
+                else:
+                    # Multiple parts - last is the key, rest are modifiers
+                    final_key_name = dest_parts[-1]
+                    modifier_names = dest_parts[:-1]
+                    
+                    # Validate the final key
+                    dest_keycode = NAME_TO_KEYCODE.get(final_key_name)
+                    if dest_keycode is None:
+                        printlog(f"Warning: Unknown destination key name '{final_key_name}' on line {line_num}")
+                        continue
+                    
+                    # Validate and collect modifiers
+                    for i, mod_name_orig in enumerate(modifier_names):
+                        mod_name = mod_name_orig
+                        # Try direct lookup first
+                        mod_keycode = NAME_TO_KEYCODE.get(mod_name)
+                        if mod_keycode is None:
+                            # Try with KEY_ prefix if not present
+                            if not mod_name.startswith('KEY_'):
+                                mod_name = f"KEY_{mod_name}"
+                                mod_keycode = NAME_TO_KEYCODE.get(mod_name)
+                        
+                        # If still not found, try common abbreviations with LEFT prefix
+                        if mod_keycode is None:
+                            common_mods = {'SHIFT': 'KEY_LEFTSHIFT', 'CTRL': 'KEY_LEFTCTRL', 
+                                         'ALT': 'KEY_LEFTALT', 'META': 'KEY_LEFTMETA',
+                                         'CONTROL': 'KEY_LEFTCTRL'}
+                            if mod_name_orig.upper() in common_mods:
+                                mod_name = common_mods[mod_name_orig.upper()]
+                                mod_keycode = NAME_TO_KEYCODE.get(mod_name)
+                        
+                        if mod_keycode is None:
+                            printlog(f"Warning: Unknown modifier key name '{mod_name_orig}' on line {line_num}")
+                            dest_keycode = None  # Invalidate this entry
+                            break
+                        
+                        # Check if this is actually a valid modifier key
+                        if mod_keycode not in valid_modifiers:
+                            printlog(f"Warning: '{mod_name_orig}' is not a valid modifier key on line {line_num}")
+                            dest_keycode = None  # Invalidate this entry
+                            break
+                        
+                        dest_modifiers.add(mod_keycode)
+                    
+                    # Skip this entry if validation failed
+                    if dest_keycode is None:
+                        continue
                 
                 # Validate key_held value
                 try:
@@ -246,10 +312,12 @@ def parse_remapping_file(filepath: str) -> dict:
                     source_key_definitions[source_keycode] = set()
                 source_key_definitions[source_keycode].add(key_held)
                 
-                # Store the mapping with tuple (dest_keycode, key_held)
+                # Store the mapping with tuple (dest_keycode, modifier_set)
                 # Use tuple of (source_keycode, key_held) as key to allow multiple definitions per source key
-                remappings[(source_keycode, key_held)] = dest_keycode
-                printlog(f"Loaded remapping: {source_key_name} -> {dest_key_name} (key_held={key_held})")
+                remappings[(source_keycode, key_held)] = (dest_keycode, dest_modifiers)
+                
+                mod_str = '+'.join([KEYCODE_TO_NAME.get(m, f"mod_{m}") for m in sorted(dest_modifiers)]) + '+' if dest_modifiers else ''
+                printlog(f"Loaded remapping: {source_key_name} -> {mod_str}{KEYCODE_TO_NAME.get(dest_keycode, f'key_{dest_keycode}')} (key_held={key_held})")
     
     except Exception as e:
         printlog(f"Error reading remapping file {filepath}: {e}")
@@ -740,25 +808,53 @@ def resolve_report_definition(data: bytes):
 # HID handling functions with enhanced logging
 # ==============================================================================
 
-def send_momentary_key(ui: UInput, keycode: int):
+def send_momentary_key(ui: UInput, keycode: int, modifiers: set = None):
     """
     Send a momentary key press followed immediately by a release.
     Used for hold-time-based remapping with KEY_HELD=1 or 2.
+    
+    Args:
+        ui: UInput device
+        keycode: The key to press
+        modifiers: Set of modifier keycodes to press before the key
     """
     if ui is not None:
+        if modifiers is None:
+            modifiers = set()
+        
+        # Press all modifiers first
+        for mod_keycode in sorted(modifiers):
+            ui.write(e.EV_KEY, mod_keycode, 1)
+            ui.syn()
+        
+        # Press the main key
         ui.write(e.EV_KEY, keycode, 1)
         ui.syn()
+        
+        # Release the main key
         ui.write(e.EV_KEY, keycode, 0)
         ui.syn()
+        
+        # Release all modifiers
+        for mod_keycode in sorted(modifiers):
+            ui.write(e.EV_KEY, mod_keycode, 0)
+            ui.syn()
 
 
 def press(ui: UInput, keycode: int):
     if ui is not None:
         # Check if this key has remapping with key_held=0 (pass-through mode)
         if (keycode, 0) in key_remappings:
-            remapped_keycode = key_remappings[(keycode, 0)]
+            remapped_keycode, modifiers = key_remappings[(keycode, 0)]
+            # Press all modifiers first
+            for mod_keycode in sorted(modifiers):
+                ui.write(e.EV_KEY, mod_keycode, 1)
+                ui.syn()
+            # Press the remapped key
             ui.write(e.EV_KEY, remapped_keycode, 1)
             ui.syn()
+            # Track which modifiers are active for this remapped key
+            remapped_active_modifiers[keycode] = modifiers
         # Check if key has hold-time-based remapping (key_held=1 or 2)
         elif (keycode, 1) in key_remappings or (keycode, 2) in key_remappings:
             # Track press time but don't inject yet - wait for release
@@ -773,9 +869,16 @@ def release(ui: UInput, keycode: int):
     if ui is not None:
         # Check if this key has remapping with key_held=0 (pass-through mode)
         if (keycode, 0) in key_remappings:
-            remapped_keycode = key_remappings[(keycode, 0)]
+            remapped_keycode, modifiers = key_remappings[(keycode, 0)]
+            # Release the remapped key
             ui.write(e.EV_KEY, remapped_keycode, 0)
             ui.syn()
+            # Release all modifiers that were pressed for this key
+            if keycode in remapped_active_modifiers:
+                for mod_keycode in sorted(remapped_active_modifiers[keycode]):
+                    ui.write(e.EV_KEY, mod_keycode, 0)
+                    ui.syn()
+                del remapped_active_modifiers[keycode]
         # Check if key has hold-time-based remapping
         elif keycode in remapped_key_press_times:
             press_time = remapped_key_press_times[keycode]
@@ -787,13 +890,13 @@ def release(ui: UInput, keycode: int):
             if hold_duration >= MIN_HOLD_DURATION:
                 # Held >= 0.5s, use key_held=2
                 if (keycode, 2) in key_remappings:
-                    remapped_keycode = key_remappings[(keycode, 2)]
-                    send_momentary_key(ui, remapped_keycode)
+                    remapped_keycode, modifiers = key_remappings[(keycode, 2)]
+                    send_momentary_key(ui, remapped_keycode, modifiers)
             else:
                 # Held < 0.5s, use key_held=1
                 if (keycode, 1) in key_remappings:
-                    remapped_keycode = key_remappings[(keycode, 1)]
-                    send_momentary_key(ui, remapped_keycode)
+                    remapped_keycode, modifiers = key_remappings[(keycode, 1)]
+                    send_momentary_key(ui, remapped_keycode, modifiers)
         else:
             # No remapping, send as-is
             ui.write(e.EV_KEY, keycode, 0)
@@ -1237,10 +1340,16 @@ async def main():
         
         # Add remapped destination keys to capabilities
         if key_remappings:
-            # key_remappings now maps (source_keycode, key_held) -> dest_keycode
-            dest_keycodes = set(key_remappings.values())
-            kb_capabilities[e.EV_KEY] |= dest_keycodes
-            printlog(f"Added {len(dest_keycodes)} remapped key(s) to keyboard capabilities")
+            # key_remappings now maps (source_keycode, key_held) -> (dest_keycode, modifiers_set)
+            dest_keycodes = set()
+            modifier_keycodes = set()
+            for (dest_keycode, modifiers) in key_remappings.values():
+                dest_keycodes.add(dest_keycode)
+                modifier_keycodes.update(modifiers)
+            
+            all_remapped_keys = dest_keycodes | modifier_keycodes
+            kb_capabilities[e.EV_KEY] |= all_remapped_keys
+            printlog(f"Added {len(dest_keycodes)} remapped destination key(s) and {len(modifier_keycodes)} modifier key(s) to keyboard capabilities")
         
         mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
         
