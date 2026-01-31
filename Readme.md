@@ -185,25 +185,38 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --remapkeys /pa
 
 The remapping configuration file follows a simple format with one mapping per line:
 ```
-<source key name>:<destination key name>
+<source key name>:<destination key name>:<key_held>
 ```
 
 Where:
 - `<source key name>`: The key name sent by the Bluetooth device (e.g., `KEY_VOLUMEUP`, `KEY_NEXTSONG`)
 - `<destination key name>`: The key name you want to emit instead (e.g., `KEY_UP`, `KEY_RIGHT`)
+- `<key_held>`: Behavior mode (0, 1, or 2):
+  - **0**: Pass-through mode - send press and release events as they occur in real-time
+  - **1**: Send momentary press+release when the key is released after being held for **less than 0.5 seconds**
+  - **2**: Send momentary press+release when the key is released after being held for **0.5 seconds or more**
+
+**Important notes:**
+- If `key_held=0` is defined for a source key, you cannot also define `key_held=1` or `key_held=2` for that same key
+- You can define both `key_held=1` and `key_held=2` for the same source key (similar to triggers), allowing different actions based on hold duration
+- For `key_held=1` and `key_held=2`, the remapped key is sent as a momentary press immediately followed by a release (regardless of how long the original key was held)
 
 Example `remap.conf`:
 ```
-# Remap volume keys to arrow keys
-KEY_VOLUMEUP:KEY_UP
-KEY_VOLUMEDOWN:KEY_DOWN
+# Pass-through mode: Volume keys send arrow keys in real-time
+KEY_VOLUMEUP:KEY_UP:0
+KEY_VOLUMEDOWN:KEY_DOWN:0
 
-# Remap media keys to arrow keys
-KEY_NEXTSONG:KEY_RIGHT
-KEY_PREVIOUSSONG:KEY_LEFT
+# Hold-time behavior: Next song key sends different keys based on hold duration
+KEY_NEXTSONG:KEY_RIGHT:1        # Short press (<0.5s) sends RIGHT
+KEY_NEXTSONG:KEY_PAGEDOWN:2     # Long press (>=0.5s) sends PAGEDOWN
 
-# Remap play/pause to Enter
-KEY_PLAYPAUSE:KEY_ENTER
+# Previous song in pass-through mode
+KEY_PREVIOUSSONG:KEY_LEFT:0
+
+# Play/pause with short/long press behavior
+KEY_PLAYPAUSE:KEY_SPACE:1       # Short press sends SPACE
+KEY_PLAYPAUSE:KEY_ENTER:2       # Long press sends ENTER
 ```
 
 Lines starting with `#` are treated as comments and are ignored. Empty lines are also ignored.
