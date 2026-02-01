@@ -1365,12 +1365,17 @@ async def main():
         printlog(f"Virtual keyboard created: {ui_kb.device}")
         printlog(f"Virtual mouse created: {ui_mouse.device}")
 
+    # This is to avoid spamming log during periods of sleeping.
+    TimeoutError = False
+
     while not stop_loop:
         printlog(f"Connecting to: {device_mac}...")
         
         try:
             await client.connect()
-            printlog(f"Connected to BLE device {device_mac}.")
+            TimeoutError = False
+            if not TimeoutError:
+                printlog(f"Connected to BLE device {device_mac}.")
 
             # Read and parse report map (best-effort)
             try:
@@ -1437,7 +1442,9 @@ async def main():
             await stop_event.wait()
 
         except (asyncio.TimeoutError, asyncio.CancelledError) as err:
-            printlog(f"Connect failed: {err}. Will retry...")
+            if not TimeoutError:
+                printlog(f"Connect failed: {err}. Will retry...")
+                TimeoutError = True
         except BleakDBusError as err:
             printlog(f"Bleak DBus error during connect: {err}. Will retry...")
         except Exception as err:

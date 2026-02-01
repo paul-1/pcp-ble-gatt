@@ -364,8 +364,8 @@ def main():
     loop = GLib.MainLoop()
     STATE['loop'] = loop
 
-    # Safety: bail out if not paired within 2 minutes
-    GLib.timeout_add_seconds(120, lambda: (print('Timeout waiting for pairing'),
+    # Safety: bail out if not paired within 1 minutes
+    GLib.timeout_add_seconds(60, lambda: (print('Timeout waiting for pairing'),
                                            cleanup_and_exit(bus), False)[2])
 
     loop.run()
