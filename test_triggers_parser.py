@@ -19,7 +19,6 @@ def parse_triggers_file(filepath: str) -> list:
     
     Note: Caller should verify file exists before calling this function.
     """
-    MAX_LOG_COMMAND_LENGTH = 50
     parsed_triggers = []
     
     try:
