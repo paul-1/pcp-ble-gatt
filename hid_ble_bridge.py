@@ -1369,14 +1369,11 @@ async def main():
     TimeoutError = False
 
     while not stop_loop:
-        printlog(f"Connecting to: {device_mac}...")
-        
+        if not TimeoutError:
+            printlog(f"Connecting to: {device_mac}...")
         try:
             await client.connect()
             TimeoutError = False
-            if not TimeoutError:
-                printlog(f"Connected to BLE device {device_mac}.")
-
             # Read and parse report map (best-effort)
             try:
                 report_map = await client.read_gatt_char(UUID_HID_REPORT_MAP)
