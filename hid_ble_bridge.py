@@ -145,14 +145,13 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
     # Determine log file path
     if log_file is None:
         if device_identifier:
-            # Create filename with device MAC address (remove colons)
-            mac_sanitized = device_identifier.replace(":", "")
-            log_file = f"/var/log/pcp_hidbridge-{mac_sanitized}.log"
-            fallback_name = f"pcp_hidbridge-{mac_sanitized}.log"
+            # Create filename with device MAC address
+            log_file = f"/var/log/pcp_hidbridge-{device_identifier}.log"
+            fallback_name = f"/tmp/pcp_hidbridge-{device_identifier}.log"
         else:
             # Generic filename when searching for device
             log_file = "/var/log/pcp_hidbridge.log"
-            fallback_name = "pcp_hidbridge.log"
+            fallback_name = "/tmp/pcp_hidbridge.log"
     else:
         # Custom log file provided - extract fallback name
         fallback_name = log_file.split('/')[-1] if '/' in log_file else log_file
