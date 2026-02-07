@@ -15,6 +15,10 @@
 import sys
 import time
 import argparse
+import logging
+import os
+from logging.handlers import RotatingFileHandler
+from datetime import datetime
 import dbus
 import dbus.service
 import dbus.mainloop.glib
@@ -34,18 +38,74 @@ STATE = {
     'trust_after_pair': False,
 }
 
+# ==============================================================================
+# Logging configuration
+# ==============================================================================
+
+def setup_logging():
+    """
+    Configure logging with console and rotating file handler.
+    Always outputs to console and to log file.
+    """
+    logger = logging.getLogger('pcp_hidbridge')
+    logger.setLevel(logging.DEBUG)  # Capture all levels
+    
+    # Remove any existing handlers
+    logger.handlers.clear()
+    
+    # Console handler - always enabled for this utility
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # Rotating file handler
+    try:
+        log_dir = '/var/log'
+        # Create log directory if it doesn't exist (for testing in non-system environments)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = os.path.join(log_dir, f'pcp_hidbridge-{timestamp}.log')
+        
+        # Rotating file handler: max 5MB per file, keep 5 backup files
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=5*1024*1024,  # 5MB
+            backupCount=5
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+        
+        logger.info(f'Logging initialized. Log file: {log_file}')
+    except (OSError, PermissionError) as e:
+        # If we can't write to /var/log, fall back to console only
+        logger.warning(f'Could not create log file in /var/log: {e}. Logging to console only.')
+    
+    return logger
+
+# Initialize logger (will be properly configured in main())
+logger = logging.getLogger('pcp_hidbridge')
+
 class Agent(dbus.service.Object):
     def __init__(self, bus, path):
         super().__init__(bus, path)
 
     @dbus.service.method('org.bluez.Agent1', in_signature='', out_signature='')
     def Release(self):
-        print('Agent released')
+        logger.info('Agent released')
 
     # Auto-accept the authorization prompt
     @dbus.service.method('org.bluez.Agent1', in_signature='o', out_signature='')
     def RequestAuthorization(self, device):
-        print(f'RequestAuthorization {device} -> accept')
+        logger.info(f'RequestAuthorization {device} -> accept')
         return
 
     # Auto-accept numeric comparison / JustWorks
@@ -55,7 +115,7 @@ class Agent(dbus.service.Object):
             p = int(passkey)
         except Exception:
             p = passkey
-        print(f'RequestConfirmation {device} passkey {p:06d} -> accept' if isinstance(p, int)
+        logger.info(f'RequestConfirmation {device} passkey {p:06d} -> accept' if isinstance(p, int)
               else f'RequestConfirmation {device} passkey {passkey} -> accept')
         return
 
@@ -69,18 +129,18 @@ class Agent(dbus.service.Object):
     def DisplayPasskey(self, device, passkey):
         try:
             p = int(passkey)
-            print(f'DisplayPasskey {device} {p:06d}')
+            logger.info(f'DisplayPasskey {device} {p:06d}')
         except Exception:
-            print(f'DisplayPasskey {device} {passkey}')
+            logger.info(f'DisplayPasskey {device} {passkey}')
 
     @dbus.service.method('org.bluez.Agent1', in_signature='os', out_signature='')
     def AuthorizeService(self, device, uuid):
-        print(f'AuthorizeService {device} uuid={uuid} -> accept')
+        logger.info(f'AuthorizeService {device} uuid={uuid} -> accept')
         return
 
     @dbus.service.method('org.bluez.Agent1', in_signature='o', out_signature='')
     def Cancel(self, device):
-        print(f'Agent request canceled for {device}')
+        logger.info(f'Agent request canceled for {device}')
 
 def get_managed_objects(bus):
     obj = bus.get_object(BUS_NAME, '/')
@@ -120,7 +180,7 @@ def start_discovery():
         try:
             STATE['adapter'].StartDiscovery()
         except dbus.DBusException as e:
-            print(f'StartDiscovery failed: {e}')
+            logger.error(f'StartDiscovery failed: {e}')
 
 def power_cycle_adapter(bus):
     if not STATE['adapter_path']:
@@ -129,16 +189,16 @@ def power_cycle_adapter(bus):
     adapter_props = dbus.Interface(adapter_obj, 'org.freedesktop.DBus.Properties')
 
     try:
-        print('Power cycling adapter: off...')
+        logger.info('Power cycling adapter: off...')
         adapter_props.Set('org.bluez.Adapter1', 'Powered', dbus.Boolean(False))
     except dbus.DBusException as e:
-        print(f'Power off failed: {e}')
+        logger.error(f'Power off failed: {e}')
     time.sleep(1.0)
     try:
-        print('Power cycling adapter: on...')
+        logger.info('Power cycling adapter: on...')
         adapter_props.Set('org.bluez.Adapter1', 'Powered', dbus.Boolean(True))
     except dbus.DBusException as e:
-        print(f'Power on failed: {e}')
+        logger.error(f'Power on failed: {e}')
     STATE['power_cycled'] = True
     # Restart discovery shortly after power returns
     GLib.timeout_add(500, lambda: (start_discovery(), False)[1])
@@ -148,24 +208,24 @@ def pair_now(bus):
         return
     STATE['pair_attempted'] = True
     path = STATE['device_path']
-    print(f'Calling Pair() on {path}...')
+    logger.info(f'Calling Pair() on {path}...')
     dev_iface = dbus.Interface(bus.get_object(BUS_NAME, path), 'org.bluez.Device1')
     props_iface = dbus.Interface(bus.get_object(BUS_NAME, path), 'org.freedesktop.DBus.Properties')
 
     def ok():
-        print('Pair() completed')
+        logger.info('Pair() completed')
         STATE['paired'] = True
         # Optionally set Trusted based on CLI flag
         if STATE['trust_after_pair']:
             try:
                 props_iface.Set('org.bluez.Device1', 'Trusted', dbus.Boolean(True))
-                print('Trusted set to True')
+                logger.info('Trusted set to True')
             except dbus.DBusException as e:
-                print(f'Setting Trusted failed: {e}')
+                logger.error(f'Setting Trusted failed: {e}')
         GLib.idle_add(lambda: cleanup_and_exit(bus))
 
     def err(e):
-        print(f'Pair() error: {e}')
+        logger.error(f'Pair() error: {e}')
         # If the object disappeared or transient error, retry once after short delay
         STATE['pair_attempted'] = False
         GLib.timeout_add(1500, lambda: (pair_now(bus), False)[1])
@@ -173,13 +233,13 @@ def pair_now(bus):
     try:
         dev_iface.Pair(reply_handler=ok, error_handler=err, timeout=120)
     except dbus.DBusException as e:
-        print(f'Pair() immediate failure: {e}')
+        logger.info(f'Pair() immediate failure: {e}')
         STATE['pair_attempted'] = False
         GLib.timeout_add(1500, lambda: (pair_now(bus), False)[1])
 
 def print_device_info(bus):
     if not STATE['device_path']:
-        print('No device path available for info.')
+        logger.info('No device path available for info.')
         return
     dev_obj = bus.get_object(BUS_NAME, STATE['device_path'])
     props = dbus.Interface(dev_obj, 'org.freedesktop.DBus.Properties')
@@ -209,15 +269,15 @@ def print_device_info(bus):
         bonded = bool(info['Paired']) if info['Paired'] is not None else None
     info['Bonded'] = bonded
 
-    print('Device info at cleanup:')
-    print(f'  Address: {info["Address"]}')
-    print(f'  Name: {info["Name"]}')
-    print(f'  Paired: {info["Paired"]}')
-    print(f'  Bonded: {info["Bonded"]}')
-    print(f'  Connected: {info["Connected"]}')
-    print(f'  Trusted: {info["Trusted"]}')
-    print(f'  LegacyPairing: {info["LegacyPairing"]}')
-    print(f'  ServicesResolved: {info["ServicesResolved"]}')
+    logger.info('Device info at cleanup:')
+    logger.info(f'  Address: {info["Address"]}')
+    logger.info(f'  Name: {info["Name"]}')
+    logger.info(f'  Paired: {info["Paired"]}')
+    logger.info(f'  Bonded: {info["Bonded"]}')
+    logger.info(f'  Connected: {info["Connected"]}')
+    logger.info(f'  Trusted: {info["Trusted"]}')
+    logger.info(f'  LegacyPairing: {info["LegacyPairing"]}')
+    logger.info(f'  ServicesResolved: {info["ServicesResolved"]}')
 
 def cleanup_and_exit(bus):
     # Disconnect if still connected (we dont want to keep a link up)
@@ -227,7 +287,7 @@ def cleanup_and_exit(bus):
             dev_props = dbus.Interface(dev_obj, 'org.freedesktop.DBus.Properties')
             dev_iface = dbus.Interface(dev_obj, 'org.bluez.Device1')
             if dev_props.Get('org.bluez.Device1', 'Connected'):
-                print('Disconnecting after pairing to keep manual connect workflow...')
+                logger.info('Disconnecting after pairing to keep manual connect workflow...')
                 dev_iface.Disconnect()
         except dbus.DBusException:
             pass
@@ -242,11 +302,11 @@ def cleanup_and_exit(bus):
     try:
         agent_mgr = dbus.Interface(bus.get_object(BUS_NAME, '/org/bluez'), 'org.bluez.AgentManager1')
         agent_mgr.UnregisterAgent(AGENT_PATH)
-        print('Agent unregistered')
+        logger.info('Agent unregistered')
     except dbus.DBusException as e:
-        print(f'UnregisterAgent failed: {e}')
+        logger.error(f'UnregisterAgent failed: {e}')
 
-    print('Cleanup complete. Exiting.')
+    logger.info('Cleanup complete. Exiting.')
     if STATE['loop']:
         STATE['loop'].quit()
     return False
@@ -255,13 +315,13 @@ def on_properties_changed(bus, interface_name, changed, invalidated, path):
     # Adapter powered back on -> (re)start discovery
     if path == STATE['adapter_path'] and interface_name == 'org.bluez.Adapter1':
         if 'Powered' in changed and bool(changed['Powered']):
-            print('Adapter Powered=True')
+            logger.info('Adapter Powered=True')
             start_discovery()
         return
     # Device properties
     if path == STATE['device_path'] and interface_name == 'org.bluez.Device1':
         if 'Paired' in changed:
-            print(f'[CHG] {path} Paired -> {changed["Paired"]}')
+            logger.info(f'[CHG] {path} Paired -> {changed["Paired"]}')
             if bool(changed['Paired']):
                 STATE['paired'] = True
                 # Optionally set Trusted when paired flips to True
@@ -269,12 +329,12 @@ def on_properties_changed(bus, interface_name, changed, invalidated, path):
                     try:
                         props_iface = dbus.Interface(bus.get_object(BUS_NAME, path), 'org.freedesktop.DBus.Properties')
                         props_iface.Set('org.bluez.Device1', 'Trusted', dbus.Boolean(True))
-                        print('Trusted set to True')
+                        logger.info('Trusted set to True')
                     except dbus.DBusException as e:
-                        print(f'Setting Trusted failed: {e}')
+                        logger.error(f'Setting Trusted failed: {e}')
                 GLib.idle_add(lambda: cleanup_and_exit(bus))
         if 'Connected' in changed:
-            print(f'[CHG] {path} Connected -> {changed["Connected"]}')
+            logger.info(f'[CHG] {path} Connected -> {changed["Connected"]}')
         return
 
 def on_interfaces_added(bus, adapter, path, ifaces, target_address, target_prefix):
@@ -286,7 +346,7 @@ def on_interfaces_added(bus, adapter, path, ifaces, target_address, target_prefi
 
     addr = dev_props.get('Address')
     name = dev_props.get('Name') or dev_props.get('Alias')
-    print(f'Matched {addr} name={name} at {path}')
+    logger.info(f'Matched {addr} name={name} at {path}')
     STATE['device_path'] = path
 
     # Before power cycle: stop discovery and cycle power first (only once)
@@ -307,6 +367,10 @@ def main():
     parser.add_argument('--trust', action='store_true', help='Set Trusted=true after pairing (default: false)')
     args = parser.parse_args()
 
+    # Setup logging
+    global logger
+    logger = setup_logging()
+
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
 
@@ -316,7 +380,7 @@ def main():
     capability = 'KeyboardDisplay'
     agent_mgr.RegisterAgent(AGENT_PATH, capability)
     agent_mgr.RequestDefaultAgent(AGENT_PATH)
-    print(f'Agent registered with capability {capability}')
+    logger.info(f'Agent registered with capability {capability}')
 
     # Adapter
     objs = get_managed_objects(bus)
@@ -336,7 +400,7 @@ def main():
     try:
         adapter.SetDiscoveryFilter({'Transport': dbus.String('le'), 'DuplicateData': dbus.Boolean(True)})
     except dbus.DBusException as e:
-        print(f'Filter error (OK on some BlueZ versions): {e}')
+        logger.error(f'Filter error (OK on some BlueZ versions): {e}')
 
     # Signals: PropertiesChanged (adapter + device)
     bus.add_signal_receiver(
@@ -358,14 +422,14 @@ def main():
         if dev_props and device_matches(dev_props, args.device_mac, None if args.device_mac else args.device_name):
             on_interfaces_added(bus, adapter, path, ifaces, args.device_mac, None if args.device_mac else args.device_name)
 
-    print('Starting LE discovery...')
+    logger.info('Starting LE discovery...')
     start_discovery()
 
     loop = GLib.MainLoop()
     STATE['loop'] = loop
 
     # Safety: bail out if not paired within 1 minutes
-    GLib.timeout_add_seconds(60, lambda: (print('Timeout waiting for pairing'),
+    GLib.timeout_add_seconds(60, lambda: (logger.warning('Timeout waiting for pairing'),
                                            cleanup_and_exit(bus), False)[2])
 
     loop.run()
