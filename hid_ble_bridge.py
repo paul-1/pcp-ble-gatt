@@ -122,12 +122,13 @@ MIN_SAMPLES_FOR_CONFIDENCE = 3    # how many consistent lengths before locking i
 # Logger will be initialized in main() after device_mac is known
 logger = None
 
-def setup_logging(device_mac: str, log_file: str = None, verbosity: int = 0):
+def setup_logging(device_identifier: str = None, log_file: str = None, verbosity: int = 0):
     """
     Set up logging with rotating file handler.
     
     Args:
-        device_mac: Device MAC address to include in default log filename
+        device_identifier: Device MAC address or None. If provided, included in default log filename.
+                          If None, uses generic filename without MAC.
         log_file: Optional custom log file path (overrides default)
         verbosity: 0 = ERROR (default), 1 = INFO (-v), 2 = DEBUG (-vv)
     """
@@ -143,9 +144,18 @@ def setup_logging(device_mac: str, log_file: str = None, verbosity: int = 0):
     
     # Determine log file path
     if log_file is None:
-        # Create default filename with device MAC address (remove colons)
-        mac_sanitized = device_mac.replace(":", "")
-        log_file = f"/var/log/pcp_hidbridge-{mac_sanitized}.log"
+        if device_identifier:
+            # Create filename with device MAC address (remove colons)
+            mac_sanitized = device_identifier.replace(":", "")
+            log_file = f"/var/log/pcp_hidbridge-{mac_sanitized}.log"
+            fallback_name = f"pcp_hidbridge-{mac_sanitized}.log"
+        else:
+            # Generic filename when searching for device
+            log_file = "/var/log/pcp_hidbridge.log"
+            fallback_name = "pcp_hidbridge.log"
+    else:
+        # Custom log file provided - extract fallback name
+        fallback_name = log_file.split('/')[-1] if '/' in log_file else log_file
     
     # Create logger
     logger = logging.getLogger("hid_ble_bridge")
@@ -162,16 +172,15 @@ def setup_logging(device_mac: str, log_file: str = None, verbosity: int = 0):
             backupCount=1
         )
     except (PermissionError, OSError) as e:
-        # If we can't write to /var/log, fall back to current directory
-        fallback_log = f"pcp_hidbridge-{mac_sanitized}.log"
+        # If we can't write to specified location, fall back to current directory
         print(f"Warning: Cannot write to {log_file}: {e}")
-        print(f"Falling back to {fallback_log}")
+        print(f"Falling back to {fallback_name}")
         file_handler = RotatingFileHandler(
-            fallback_log,
+            fallback_name,
             maxBytes=100 * 1024,  # 100KB
             backupCount=1
         )
-        log_file = fallback_log
+        log_file = fallback_name
     
     # Set format: mm/dd hh:mm:ss [Log Level]:[Line number] [log message]
     formatter = logging.Formatter(
@@ -623,45 +632,6 @@ def get_paired_devices() -> dict:
                     devices[name] = mac
     return devices
 
-
-async def find_device_by_name_prelogging(device_name: str, scan_timeout: float = 10.0) -> str:
-    """
-    Version of find_device_by_name used before logging is initialized.
-    Uses print() instead of logger.
-    """
-    paired_devices = get_paired_devices()
-    for name, mac in paired_devices.items():
-        if device_name.lower() in name.lower():
-            print(f"Found paired device '{name}' with MAC address {mac}.")
-            return mac
-
-    print(f"Device not paired. Scanning for '{device_name}'...")
-    found_device = None
-
-    def detection_callback(device, advertisement_data):
-        nonlocal found_device
-        if device.name and device_name.lower() in device.name.lower():
-            found_device = device
-
-    scanner = BleakScanner(detection_callback=detection_callback)
-    try:
-        await scanner.start()
-        start_time = asyncio.get_event_loop().time()
-        while found_device is None:
-            if asyncio.get_event_loop().time() - start_time > scan_timeout:
-                break
-            await asyncio.sleep(0.1)
-    except Exception as ex:
-        print(f"Error during scan: {ex}")
-    finally:
-        await scanner.stop()
-
-    if found_device:
-        print(f"Found device '{found_device.name}' at {found_device.address}.")
-        return found_device.address
-
-    print(f"Could not find device named '{device_name}'.")
-    return None
 
 async def find_device_by_name(device_name: str, scan_timeout: float = 10.0) -> str:
     paired_devices = get_paired_devices()
@@ -1382,26 +1352,27 @@ async def main():
 
     global stop_loop, triggers, key_remappings, report_definitions, report_ids_present
 
-    # Wait for controller to be ready before getting device MAC
+    # Initialize logging right after parsing args
+    # If device_mac is provided, use it in the filename; otherwise use generic filename
+    device_identifier = args.device_mac if args.device_mac else None
+    setup_logging(device_identifier, args.logfile, args.verbosity)
+
+    # Wait for controller to be ready
     while True:
         info = get_controller_power()
         if info["powered"]:
             break
         else:
-            # Can't log yet, use print for this pre-logging message
-            print("Controller is not ready, waiting...")
+            logger.info("Controller is not ready, waiting...")
             await asyncio.sleep(2)
 
-    # Resolve MAC address first (needed for log filename)
+    # Resolve MAC address
     if args.device_name:
-        device_mac = await find_device_by_name_prelogging(args.device_name, args.scan_timeout)
+        device_mac = await find_device_by_name(args.device_name, args.scan_timeout)
         if device_mac is None:
             return
     else:
         device_mac = args.device_mac
-
-    # Now initialize logging with the device MAC address
-    setup_logging(device_mac, args.logfile, args.verbosity)
 
     # Load trigger configuration if specified
     if args.triggers:

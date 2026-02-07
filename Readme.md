@@ -155,13 +155,18 @@ sudo -E python3 hid_ble_bridge.py --device-name "HID Remote01"
 
 ### Logging Options
 
-The application uses file-based logging with automatic log rotation. By default, logs are written to `/var/log/pcp_hidbridge-<device-mac>.log` with ERROR level.
+The application uses file-based logging with automatic log rotation. By default, logs are written with ERROR level only.
+
+**Log File Naming:**
+- When using `--device-mac`: `/var/log/pcp_hidbridge-<device-mac>.log` (e.g., `/var/log/pcp_hidbridge-AABBCCDDEEFF.log`)
+- When using `--device-name`: `/var/log/pcp_hidbridge.log` (generic filename since MAC is not known until device is found)
+- When using `--logfile`: Custom path specified by user
 
 #### Default Logging (ERROR level only)
 ```ash
 sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF
 ```
-Only errors are logged to the file.
+Only errors are logged to `/var/log/pcp_hidbridge-AABBCCDDEEFF.log`.
 
 #### Info Level Logging
 ```ash
@@ -183,6 +188,12 @@ sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --logfile /path
 ```
 Override the default log file location.
 
+#### Searching by Device Name
+```ash
+sudo -E python3 hid_ble_bridge.py --device-name "HID Remote01" -vv
+```
+When searching by device name, logs are written to `/var/log/pcp_hidbridge.log` (without MAC address).
+
 **Log Format:** `mm/dd hh:mm:ss [Log Level]:[Line number] [log message]`
 
 **Log Rotation:** Log files are automatically rotated when they reach 100KB in size, with 1 backup file kept.
@@ -194,7 +205,7 @@ Override the default log file location.
 - `-v`: Enable INFO level logging
 - `-vv`: Enable DEBUG level logging (equivalent to `--debug`)
 - `--debug`: Enable debug logging (backwards compatible, equivalent to `-vv`)
-- `--logfile <path>`: Path to log file (default: `/var/log/pcp_hidbridge-<device-mac>.log`)
+- `--logfile <path>`: Path to log file (default: `/var/log/pcp_hidbridge-<device-mac>.log` or `/var/log/pcp_hidbridge.log`)
 - `--triggers <path>`: Path to trigger configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events.
 - `--remapkeys <path>`: Path to key remapping configuration file. Allows remapping keys from the Bluetooth device to different keys. **Cannot be used together with --triggers**.
 
@@ -368,8 +379,11 @@ The application will only trigger the command when all specified modifier keys a
 - **No Input Events**: Check that `/dev/uinput` is accessible. Ensure no other applications are interfering.
 - **Checking Logs**: View the log file to diagnose issues:
   ```ash
-  # View the log file (replace MAC address with your device's MAC)
+  # View log for device connected by MAC address (replace with your device's MAC)
   sudo tail -f /var/log/pcp_hidbridge-AABBCCDDEEFF.log
+  
+  # View log when device found by name (generic log file)
+  sudo tail -f /var/log/pcp_hidbridge.log
   
   # Or if you used a custom log file location
   sudo tail -f /path/to/your/logfile.log
