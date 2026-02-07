@@ -45,7 +45,7 @@ STATE = {
 def setup_logging():
     """
     Configure logging with console and rotating file handler.
-    Always outputs to console and to log file.
+    Console outputs INFO level and above, while file logging captures all levels including DEBUG.
     """
     logger = logging.getLogger('pcp_hidbridge')
     logger.setLevel(logging.DEBUG)  # Capture all levels

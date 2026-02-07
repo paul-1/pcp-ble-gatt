@@ -1338,7 +1338,7 @@ async def main():
             logger.info(f"Loaded {len(triggers)} trigger(s) from {args.triggers}")
         else:
             logger.warning(f"Trigger file not found: {args.triggers}")
-            logger.info("Continuing without trigger handling...")
+            logger.debug("Continuing without trigger handling...")
     
     # Load key remapping configuration if specified
     if args.remapkeys:
@@ -1347,7 +1347,7 @@ async def main():
             logger.info(f"Loaded {len(key_remappings)} key remapping(s) from {args.remapkeys}")
         else:
             logger.warning(f"Remapping file not found: {args.remapkeys}")
-            logger.info("Continuing without key remapping...")
+            logger.debug("Continuing without key remapping...")
 
     while True:
         info = get_controller_power()
@@ -1441,7 +1441,7 @@ async def main():
                     for rid, definition in report_definitions.items():
                         rid_label = f"ID {rid}" if rid != 0 else "no ID"
                         logger.debug(f"Report {rid_label}: type={definition['type']} size={definition['size_bytes']} bytes")
-                    logger.info(f"Report .* present: {report_ids_present}")
+                    logger.info(f"Report IDs present: {report_ids_present}")
                 else:
                     logger.info("Report map parsed but no report definitions found.")
             except Exception as err:
