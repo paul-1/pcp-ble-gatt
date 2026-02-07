@@ -119,7 +119,7 @@ observed_mouse_lengths = {}  # source - set of seen mouse payload lengths
 MOUSE_MIN_MOVEMENT_THRESHOLD = 2  # ignore tiny/noise reports for length detection
 MIN_SAMPLES_FOR_CONFIDENCE = 3    # how many consistent lengths before locking in
 
-# Logger will be initialized in main() after device_mac is known
+# Logger will be initialized in main() after parsing command line arguments
 logger = None
 
 def setup_logging(device_identifier: str = None, log_file: str = None, verbosity: int = 0):
@@ -161,7 +161,8 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
     logger = logging.getLogger("hid_ble_bridge")
     logger.setLevel(log_level)
     
-    # Remove any existing handlers
+    # Remove any existing handlers (in case this function is called multiple times)
+    # This ensures clean state if logging needs to be reconfigured
     logger.handlers.clear()
     
     # Create rotating file handler (100KB max, 1 backup)
@@ -173,7 +174,8 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
         )
     except (PermissionError, OSError) as e:
         # If we can't write to specified location, fall back to current directory
-        print(f"Warning: Cannot write to {log_file}: {e}")
+        error_msg = f"Cannot write to {log_file}: {e}"
+        print(f"Warning: {error_msg}")
         print(f"Falling back to {fallback_name}")
         file_handler = RotatingFileHandler(
             fallback_name,
@@ -192,7 +194,16 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
     # Add handler to logger
     logger.addHandler(file_handler)
     
-    logger.info(f"Logging initialized: file={log_file}, level={logging.getLevelName(log_level)}")
+    # Log permission error if we had to fall back
+    if 'error_msg' in locals():
+        logger.warning(error_msg)
+    
+    # Log initialization at INFO level always, so user knows logging is working
+    # Temporarily set level to INFO to ensure this message is logged
+    original_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.info(f"Logging initialized: file={log_file}, level={logging.getLevelName(original_level)}")
+    logger.setLevel(original_level)  # Restore original level
     
     return logger
 
@@ -220,7 +231,12 @@ def parse_triggers_file(filepath: str) -> list:
     where event_keys is a list of key names (first is main key, rest are modifiers)
     
     Note: Caller should verify file exists before calling this function.
+    Note: Logger must be initialized before calling this function.
     """
+    if logger is None:
+        print("ERROR: Logger not initialized before parsing triggers file")
+        return []
+    
     parsed_triggers = []
     
     try:
@@ -275,7 +291,12 @@ def parse_remapping_file(filepath: str) -> dict:
     Returns dict mapping (source_keycode, key_held) to (destination keycode, set of modifier keycodes).
     
     Note: Caller should verify file exists before calling this function.
+    Note: Logger must be initialized before calling this function.
     """
+    if logger is None:
+        print("ERROR: Logger not initialized before parsing remapping file")
+        return {}
+    
     remappings = {}
     # Track which source keys have which key_held values defined
     source_key_definitions = {}
