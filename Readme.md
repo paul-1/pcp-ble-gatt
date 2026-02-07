@@ -153,15 +153,48 @@ sudo -E python3 hid_ble_bridge.py --device-name "HID Remote01"
 
 ---
 
-### Enable Debug Logging (No output is produced by default)
+### Logging Options
+
+The application uses file-based logging with automatic log rotation. By default, logs are written to `/var/log/pcp_hidbridge-<device-mac>.log` with ERROR level.
+
+#### Default Logging (ERROR level only)
 ```ash
-sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --debug
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF
 ```
+Only errors are logged to the file.
+
+#### Info Level Logging
+```ash
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF -v
+```
+Logs informational messages (connections, device state, etc.) and errors.
+
+#### Debug Level Logging
+```ash
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF -vv
+```
+Logs detailed debug information including HID reports, payloads, and internal state.
+
+**Note:** The `--debug` flag is supported for backwards compatibility and is equivalent to `-vv`.
+
+#### Custom Log File Location
+```ash
+sudo -E python3 hid_ble_bridge.py --device-mac AA:BB:CC:DD:EE:FF --logfile /path/to/custom.log
+```
+Override the default log file location.
+
+**Log Format:** `mm/dd hh:mm:ss [Log Level]:[Line number] [log message]`
+
+**Log Rotation:** Log files are automatically rotated when they reach 100KB in size, with 1 backup file kept.
 
 ---
 
 ### Additional Options
 - `--scan-timeout <seconds>`: Timeout for device scanning by name (default: 10.0)
+- `-v`: Enable INFO level logging
+- `-vv`: Enable DEBUG level logging (equivalent to `--debug`)
+- `--debug`: Enable debug logging (backwards compatible, equivalent to `-vv`)
+- `--logfile <path>`: Path to log file (default: `/var/log/pcp_hidbridge-<device-mac>.log`)
 - `--triggers <path>`: Path to trigger configuration file for executing commands on key events. If specified and the file exists, the application will directly handle trigger events.
 - `--remapkeys <path>`: Path to key remapping configuration file. Allows remapping keys from the Bluetooth device to different keys. **Cannot be used together with --triggers**.
 
@@ -330,10 +363,18 @@ The application will only trigger the command when all specified modifier keys a
 
 ## Troubleshooting General Issues
 
-- **Connection Issues**: Ensure the device is in paired.  If you do not pair manually, bleak will attempt to pair, but will require you to be running bluetoothctl to acknowledge pairing request.
+- **Connection Issues**: Ensure the device is paired. If you do not pair manually, bleak will attempt to pair, but will require you to be running bluetoothctl to acknowledge pairing request.
 - **Permission Denied**: Always run with `sudo -E` to preserve environment variables.
 - **No Input Events**: Check that `/dev/uinput` is accessible. Ensure no other applications are interfering.
-- **Debug Mode**: Use `--debug` for detailed logs to diagnose issues.
+- **Checking Logs**: View the log file to diagnose issues:
+  ```ash
+  # View the log file (replace MAC address with your device's MAC)
+  sudo tail -f /var/log/pcp_hidbridge-AABBCCDDEEFF.log
+  
+  # Or if you used a custom log file location
+  sudo tail -f /path/to/your/logfile.log
+  ```
+- **Verbose Logging**: Use `-v` for INFO level or `-vv` for DEBUG level logging to get more detailed diagnostic information.
 
 ---
 

@@ -12,6 +12,8 @@ import argparse
 import subprocess
 import time
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 from bleak import BleakClient, BleakScanner
 from evdev import UInput, ecodes as e
 from bleak.exc import BleakDeviceNotFoundError, BleakDBusError
@@ -117,11 +119,73 @@ observed_mouse_lengths = {}  # source - set of seen mouse payload lengths
 MOUSE_MIN_MOVEMENT_THRESHOLD = 2  # ignore tiny/noise reports for length detection
 MIN_SAMPLES_FOR_CONFIDENCE = 3    # how many consistent lengths before locking in
 
-debug = False
-def printlog(data):
-    global debug
-    if debug:
-        print(data)
+# Logger will be initialized in main() after device_mac is known
+logger = None
+
+def setup_logging(device_mac: str, log_file: str = None, verbosity: int = 0):
+    """
+    Set up logging with rotating file handler.
+    
+    Args:
+        device_mac: Device MAC address to include in default log filename
+        log_file: Optional custom log file path (overrides default)
+        verbosity: 0 = ERROR (default), 1 = INFO (-v), 2 = DEBUG (-vv)
+    """
+    global logger
+    
+    # Determine log level based on verbosity
+    if verbosity >= 2:
+        log_level = logging.DEBUG
+    elif verbosity == 1:
+        log_level = logging.INFO
+    else:
+        log_level = logging.ERROR
+    
+    # Determine log file path
+    if log_file is None:
+        # Create default filename with device MAC address (remove colons)
+        mac_sanitized = device_mac.replace(":", "")
+        log_file = f"/var/log/pcp_hidbridge-{mac_sanitized}.log"
+    
+    # Create logger
+    logger = logging.getLogger("hid_ble_bridge")
+    logger.setLevel(log_level)
+    
+    # Remove any existing handlers
+    logger.handlers.clear()
+    
+    # Create rotating file handler (100KB max, 1 backup)
+    try:
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=100 * 1024,  # 100KB
+            backupCount=1
+        )
+    except (PermissionError, OSError) as e:
+        # If we can't write to /var/log, fall back to current directory
+        fallback_log = f"pcp_hidbridge-{mac_sanitized}.log"
+        print(f"Warning: Cannot write to {log_file}: {e}")
+        print(f"Falling back to {fallback_log}")
+        file_handler = RotatingFileHandler(
+            fallback_log,
+            maxBytes=100 * 1024,  # 100KB
+            backupCount=1
+        )
+        log_file = fallback_log
+    
+    # Set format: mm/dd hh:mm:ss [Log Level]:[Line number] [log message]
+    formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s]:%(lineno)d %(message)s',
+        datefmt='%m/%d %H:%M:%S'
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    logger.addHandler(file_handler)
+    
+    logger.info(f"Logging initialized: file={log_file}, level={logging.getLevelName(log_level)}")
+    
+    return logger
 
 # ==============================================================================
 # Trigger configuration handling
@@ -161,7 +225,7 @@ def parse_triggers_file(filepath: str) -> list:
                 # Split on whitespace, limiting to 3 parts
                 parts = line.split(None, 2)
                 if len(parts) < 3:
-                    printlog(f"Warning: Invalid trigger line {line_num}: {line}")
+                    logger.warning(f"Invalid trigger line {line_num}: {line}")
                     continue
                 
                 event_name, event_value_str, command = parts
@@ -170,7 +234,7 @@ def parse_triggers_file(filepath: str) -> list:
                 try:
                     event_value = int(event_value_str)
                 except ValueError:
-                    printlog(f"Warning: Invalid event value on line {line_num}: {event_value_str}")
+                    logger.warning(f"Invalid event value on line {line_num}: {event_value_str}")
                     continue
                 
                 # Parse event name (may include modifiers with +)
@@ -179,10 +243,10 @@ def parse_triggers_file(filepath: str) -> list:
                 parsed_triggers.append((event_keys, event_value, command))
                 # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
                 safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
-                printlog(f"Loaded trigger: {event_keys} = {event_value} -> {safe_command}")
+                logger.debug(f"Loaded trigger: {event_keys} = {event_value} -> {safe_command}")
     
     except Exception as e:
-        printlog(f"Error reading trigger file {filepath}: {e}")
+        logger.error(f"Error reading trigger file {filepath}: {e}")
     
     return parsed_triggers
 
@@ -227,7 +291,7 @@ def parse_remapping_file(filepath: str) -> dict:
                 # Split on colon, expecting exactly 3 parts
                 parts = line.split(':')
                 if len(parts) != 3:
-                    printlog(f"Warning: Invalid remapping line {line_num}: {line} (expected 3 colon-separated fields)")
+                    logger.warning(f"Invalid remapping line {line_num}: {line} (expected 3 colon-separated fields)")
                     continue
                 
                 source_key_name, dest_spec, key_held_str = parts[0].strip(), parts[1].strip(), parts[2].strip()
@@ -235,7 +299,7 @@ def parse_remapping_file(filepath: str) -> dict:
                 # Validate source key
                 source_keycode = NAME_TO_KEYCODE.get(source_key_name)
                 if source_keycode is None:
-                    printlog(f"Warning: Unknown source key name '{source_key_name}' on line {line_num}")
+                    logger.warning(f"Unknown source key name '{source_key_name}' on line {line_num}")
                     continue
                 
                 # Parse destination spec - can be "KEY_C" or "SHIFT+KEY_C" or "CTRL+ALT+KEY_C"
@@ -247,7 +311,7 @@ def parse_remapping_file(filepath: str) -> dict:
                     # Simple key without modifiers
                     dest_keycode = NAME_TO_KEYCODE.get(dest_parts[0])
                     if dest_keycode is None:
-                        printlog(f"Warning: Unknown destination key name '{dest_parts[0]}' on line {line_num}")
+                        logger.warning(f"Unknown destination key name '{dest_parts[0]}' on line {line_num}")
                         continue
                 else:
                     # Multiple parts - last is the key, rest are modifiers
@@ -257,7 +321,7 @@ def parse_remapping_file(filepath: str) -> dict:
                     # Validate the final key
                     dest_keycode = NAME_TO_KEYCODE.get(final_key_name)
                     if dest_keycode is None:
-                        printlog(f"Warning: Unknown destination key name '{final_key_name}' on line {line_num}")
+                        logger.warning(f"Unknown destination key name '{final_key_name}' on line {line_num}")
                         continue
                     
                     # Validate and collect modifiers
@@ -281,13 +345,13 @@ def parse_remapping_file(filepath: str) -> dict:
                                 mod_keycode = NAME_TO_KEYCODE.get(mod_name)
                         
                         if mod_keycode is None:
-                            printlog(f"Warning: Unknown modifier key name '{mod_name_orig}' on line {line_num}")
+                            logger.warning(f"Unknown modifier key name '{mod_name_orig}' on line {line_num}")
                             dest_keycode = None  # Invalidate this entry
                             break
                         
                         # Check if this is actually a valid modifier key
                         if mod_keycode not in valid_modifiers:
-                            printlog(f"Warning: '{mod_name_orig}' is not a valid modifier key on line {line_num}")
+                            logger.warning(f"'{mod_name_orig}' is not a valid modifier key on line {line_num}")
                             dest_keycode = None  # Invalidate this entry
                             break
                         
@@ -301,10 +365,10 @@ def parse_remapping_file(filepath: str) -> dict:
                 try:
                     key_held = int(key_held_str)
                     if key_held not in (0, 1, 2):
-                        printlog(f"Warning: Invalid key_held value '{key_held_str}' on line {line_num} (must be 0, 1, or 2)")
+                        logger.warning(f"Invalid key_held value '{key_held_str}' on line {line_num} (must be 0, 1, or 2)")
                         continue
                 except ValueError:
-                    printlog(f"Warning: Invalid key_held value '{key_held_str}' on line {line_num} (must be integer 0, 1, or 2)")
+                    logger.warning(f"Invalid key_held value '{key_held_str}' on line {line_num} (must be integer 0, 1, or 2)")
                     continue
                 
                 # Track definitions for validation
@@ -323,10 +387,10 @@ def parse_remapping_file(filepath: str) -> dict:
                     dest_spec_str = '+'.join(mod_names) + '+' + dest_key_name
                 else:
                     dest_spec_str = dest_key_name
-                printlog(f"Loaded remapping: {source_key_name} -> {dest_spec_str} (key_held={key_held})")
+                logger.debug(f"Loaded remapping: {source_key_name} -> {dest_spec_str} (key_held={key_held})")
     
     except Exception as e:
-        printlog(f"Error reading remapping file {filepath}: {e}")
+        logger.error(f"Error reading remapping file {filepath}: {e}")
     
     # Validate that if key_held 0 is defined, no 1 or 2 can be defined
     # Filter out invalid combinations
@@ -334,7 +398,7 @@ def parse_remapping_file(filepath: str) -> dict:
     for source_keycode, key_held_values in source_key_definitions.items():
         if 0 in key_held_values and len(key_held_values) > 1:
             key_name_str = KEYCODE_TO_NAME.get(source_keycode, f"keycode_{source_keycode}")
-            printlog(f"Error: Key {key_name_str} has key_held=0 defined along with other values. Ignoring all definitions for this key.")
+            logger.error(f"Key {key_name_str} has key_held=0 defined along with other values. Ignoring all definitions for this key.")
             # Remove all mappings for this source key
             for kh in key_held_values:
                 if (source_keycode, kh) in remappings:
@@ -390,7 +454,7 @@ def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
                 required_modifier_codes.add(mod_code)
             else:
                 # Log warning for unknown modifier names
-                printlog(f"Warning: Unknown modifier key name '{mod_name}' in trigger configuration")
+                logger.warning(f"Unknown modifier key name '{mod_name}' in trigger configuration")
         
         # Check if required modifiers are a subset of active modifiers
         # This allows additional modifiers to be pressed (standard triggerhappy behavior)
@@ -421,10 +485,10 @@ async def execute_trigger_command(command: str):
         )
         # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
         safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
-        printlog(f"Executed trigger: {safe_command}")
+        logger.info(f"Executed trigger: {safe_command}")
         # Note: We don't wait for the process to complete to avoid blocking
     except Exception as e:
-        printlog(f"Error executing trigger command: {e}")
+        logger.error(f"Error executing trigger command: {e}")
 
 async def handle_key_release_triggers(keycode: int, press_times: dict, active_modifiers: set, actions: list):
     """
@@ -493,16 +557,16 @@ def create_uinput_with_retry(capabilities, name, max_retries=5, initial_delay=0.
         try:
             ui = UInput(capabilities, name=name)
             if attempt > 0:
-                printlog(f"Successfully created {name} after {attempt + 1} attempts")
+                logger.info(f"Successfully created {name} after {attempt + 1} attempts")
             return ui
         except OSError as e:
             last_error = e
             if attempt < max_retries - 1:
-                printlog(f"Failed to create {name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:g}s...")
+                logger.warning(f"Failed to create {name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:g}s...")
                 time.sleep(delay)
                 delay = min(delay * 2, max_delay)  # Exponential backoff with cap
             else:
-                printlog(f"Failed to create {name} after {max_retries} attempts")
+                logger.error(f"Failed to create {name} after {max_retries} attempts")
     
     # If we get here, all retries failed
     raise last_error
@@ -560,14 +624,18 @@ def get_paired_devices() -> dict:
     return devices
 
 
-async def find_device_by_name(device_name: str, scan_timeout: float = 10.0) -> str:
+async def find_device_by_name_prelogging(device_name: str, scan_timeout: float = 10.0) -> str:
+    """
+    Version of find_device_by_name used before logging is initialized.
+    Uses print() instead of logger.
+    """
     paired_devices = get_paired_devices()
     for name, mac in paired_devices.items():
         if device_name.lower() in name.lower():
-            printlog(f"Found paired device '{name}' with MAC address {mac}.")
+            print(f"Found paired device '{name}' with MAC address {mac}.")
             return mac
 
-    printlog(f"Device not paired. Scanning for '{device_name}'...")
+    print(f"Device not paired. Scanning for '{device_name}'...")
     found_device = None
 
     def detection_callback(device, advertisement_data):
@@ -584,47 +652,82 @@ async def find_device_by_name(device_name: str, scan_timeout: float = 10.0) -> s
                 break
             await asyncio.sleep(0.1)
     except Exception as ex:
-        printlog(f"Error during scan: {ex}")
+        print(f"Error during scan: {ex}")
     finally:
         await scanner.stop()
 
     if found_device:
-        printlog(f"Found device '{found_device.name}' at {found_device.address}.")
+        print(f"Found device '{found_device.name}' at {found_device.address}.")
         return found_device.address
 
-    printlog(f"Could not find device named '{device_name}'.")
+    print(f"Could not find device named '{device_name}'.")
+    return None
+
+async def find_device_by_name(device_name: str, scan_timeout: float = 10.0) -> str:
+    paired_devices = get_paired_devices()
+    for name, mac in paired_devices.items():
+        if device_name.lower() in name.lower():
+            logger.info(f"Found paired device '{name}' with MAC address {mac}.")
+            return mac
+
+    logger.info(f"Device not paired. Scanning for '{device_name}'...")
+    found_device = None
+
+    def detection_callback(device, advertisement_data):
+        nonlocal found_device
+        if device.name and device_name.lower() in device.name.lower():
+            found_device = device
+
+    scanner = BleakScanner(detection_callback=detection_callback)
+    try:
+        await scanner.start()
+        start_time = asyncio.get_event_loop().time()
+        while found_device is None:
+            if asyncio.get_event_loop().time() - start_time > scan_timeout:
+                break
+            await asyncio.sleep(0.1)
+    except Exception as ex:
+        logger.error(f"Error during scan: {ex}")
+    finally:
+        await scanner.stop()
+
+    if found_device:
+        logger.info(f"Found device '{found_device.name}' at {found_device.address}.")
+        return found_device.address
+
+    logger.error(f"Could not find device named '{device_name}'.")
     return None
 
 
 async def prepare_device_for_connection(mac_address: str) -> bool:
     info = get_device_info(mac_address)
-    printlog(f"Device state: Paired={info['paired']}, Bonded={info['bonded']}, "
+    logger.info(f"Device state: Paired={info['paired']}, Bonded={info['bonded']}, "
           f"Trusted={info['trusted']}, Connected={info['connected']}")
 
     if info["connected"]:
-        printlog("Device is connected. Disconnecting...")
+        logger.info("Device is connected. Disconnecting...")
         run_bluetoothctl("disconnect", mac_address)
         await asyncio.sleep(1)
         info = get_device_info(mac_address)
         if info["connected"]:
-            printlog("Error: Failed to disconnect device.")
+            logger.error("Failed to disconnect device.")
             return False
-        printlog("Device disconnected.")
+        logger.info("Device disconnected.")
 
     if info["paired"] and not info["bonded"]:
-        printlog("Error: Device is paired but not bonded. Please remove and re-pair the device.")
+        logger.error("Device is paired but not bonded. Please remove and re-pair the device.")
         return False
 
     if info["trusted"]:
-        printlog("Device is trusted. Removing trust to prevent auto-connect...")
+        logger.info("Device is trusted. Removing trust to prevent auto-connect...")
         run_bluetoothctl("untrust", mac_address)
         await asyncio.sleep(0.5)
-        printlog("Device untrusted.")
+        logger.info("Device untrusted.")
 
     if not info["paired"]:
-        printlog("Device is not paired. Bleak will handle pairing automatically.")
+        logger.info("Device is not paired. Bleak will handle pairing automatically.")
 
-    printlog("Device is ready for connection.")
+    logger.info("Device is ready for connection.")
     return True
 
 def parse_hid_report_map(report_map: bytes) -> dict:
@@ -1177,7 +1280,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 
     #If there are no actions and the payload is 0 (No key Pressed, just skip the logging)
     if actions or payload_hex.strip("0") != "":
-        printlog(f"[{source}] Report type={report_type} payload={payload_hex} {action_str}")
+        logger.debug(f"[{source}] Report type={report_type} payload={payload_hex} {action_str}")
 
     for command in commands_to_execute:
         await execute_trigger_command(command)
@@ -1207,16 +1310,16 @@ async def notification_handler(client: BleakClient, report_info: dict, ui_kb: UI
                 decode_hid_report_and_inject(ui_kb, ui_mouse, f"HID-{handle}", data, report_type, size_bytes)
             ),
         )
-        printlog(f"Started notifications for HID report (handle={handle}, type={report_type}, size={size_bytes}).")
+        logger.debug(f"Started notifications for HID report (handle={handle}, type={report_type}, size={size_bytes}).")
         while True:
             await asyncio.sleep(1)
     except asyncio.CancelledError:
-        printlog(f"Notification handler for handle {handle} canceled.")
+        logger.debug(f"Notification handler for handle {handle} canceled.")
     finally:
         try:
             await client.stop_notify(handle)
         except Exception as e:
-            printlog(f"Error stopping notifications: {e}")
+            logger.error(f"Error stopping notifications: {e}")
 
 
 async def cleanup(client, tasks):
@@ -1232,9 +1335,9 @@ async def cleanup(client, tasks):
         try:
             await client.disconnect()
         except EOFError:
-            printlog("Disconnect interrupted (EOFError) during shutdown; ignoring.")
+            logger.debug("Disconnect interrupted (EOFError) during shutdown; ignoring.")
         except Exception as e:
-            printlog(f"Error during disconnect: {e}")
+            logger.error(f"Error during disconnect: {e}")
     
     # Clear task list to prevent memory leaks on reconnection
     global notification_tasks, key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers, key_press_times, media_press_times, system_press_times
@@ -1260,7 +1363,16 @@ async def main():
     group.add_argument("--device-mac", help="Bluetooth MAC address.")
     group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
     parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
-    parser.add_argument("--debug", action="store_true", help="Enable messages on console")
+    
+    # Verbosity arguments (mutually exclusive with --debug for backwards compatibility)
+    verbosity_group = parser.add_mutually_exclusive_group()
+    verbosity_group.add_argument("-v", action="count", default=0, dest="verbosity", 
+                                help="Increase verbosity: -v for INFO level, -vv for DEBUG level")
+    verbosity_group.add_argument("--debug", action="store_const", const=2, dest="verbosity",
+                                help="Enable debug logging (equivalent to -vv, for backwards compatibility)")
+    
+    parser.add_argument("--logfile", type=str, default=None,
+                       help="Path to log file (default: /var/log/pcp_hidbridge-<device-mac>.log)")
     
     # Create mutually exclusive group for triggers and remapkeys
     mode_group = parser.add_mutually_exclusive_group()
@@ -1268,44 +1380,46 @@ async def main():
     mode_group.add_argument("--remapkeys", type=str, help="Path to key remapping configuration file. Format: SOURCE_KEY:DEST_KEY:KEY_HELD (one mapping per line).")
     args = parser.parse_args()
 
-    global stop_loop, debug, triggers, key_remappings, report_definitions, report_ids_present
+    global stop_loop, triggers, key_remappings, report_definitions, report_ids_present
 
-    if args.debug:
-        debug = True
-
-    # Load trigger configuration if specified
-    if args.triggers:
-        if os.path.isfile(args.triggers):
-            triggers = parse_triggers_file(args.triggers)
-            printlog(f"Loaded {len(triggers)} trigger(s) from {args.triggers}")
-        else:
-            printlog(f"Warning: Trigger file not found: {args.triggers}")
-            printlog("Continuing without trigger handling...")
-    
-    # Load key remapping configuration if specified
-    if args.remapkeys:
-        if os.path.isfile(args.remapkeys):
-            key_remappings = parse_remapping_file(args.remapkeys)
-            printlog(f"Loaded {len(key_remappings)} key remapping(s) from {args.remapkeys}")
-        else:
-            printlog(f"Warning: Remapping file not found: {args.remapkeys}")
-            printlog("Continuing without key remapping...")
-
+    # Wait for controller to be ready before getting device MAC
     while True:
         info = get_controller_power()
         if info["powered"]:
             break
         else:
-            printlog("Controller is not ready")
+            # Can't log yet, use print for this pre-logging message
+            print("Controller is not ready, waiting...")
             await asyncio.sleep(2)
 
-    # Resolve MAC address
+    # Resolve MAC address first (needed for log filename)
     if args.device_name:
-        device_mac = await find_device_by_name(args.device_name, args.scan_timeout)
+        device_mac = await find_device_by_name_prelogging(args.device_name, args.scan_timeout)
         if device_mac is None:
             return
     else:
         device_mac = args.device_mac
+
+    # Now initialize logging with the device MAC address
+    setup_logging(device_mac, args.logfile, args.verbosity)
+
+    # Load trigger configuration if specified
+    if args.triggers:
+        if os.path.isfile(args.triggers):
+            triggers = parse_triggers_file(args.triggers)
+            logger.info(f"Loaded {len(triggers)} trigger(s) from {args.triggers}")
+        else:
+            logger.warning(f"Trigger file not found: {args.triggers}")
+            logger.warning("Continuing without trigger handling...")
+    
+    # Load key remapping configuration if specified
+    if args.remapkeys:
+        if os.path.isfile(args.remapkeys):
+            key_remappings = parse_remapping_file(args.remapkeys)
+            logger.info(f"Loaded {len(key_remappings)} key remapping(s) from {args.remapkeys}")
+        else:
+            logger.warning(f"Remapping file not found: {args.remapkeys}")
+            logger.warning("Continuing without key remapping...")
 
     # Prepare the device (disconnect if connected, check bonding, untrust)
     ready = await prepare_device_for_connection(device_mac)
@@ -1318,10 +1432,10 @@ async def main():
     def disconnected_callback(client):
         try:
             if not stop_event.is_set():
-                printlog("Device disconnected. Will attempt to reconnect...")
+                logger.info("Device disconnected. Will attempt to reconnect...")
             stop_event.set()
         except Exception as e:
-            printlog(f"Error in disconnect callback: {e}")
+            logger.error(f"Error in disconnect callback: {e}")
     
     client = BleakClient(device_mac, disconnected_callback=disconnected_callback)
 
@@ -1340,7 +1454,7 @@ async def main():
     if args.triggers:
         ui_kb = None
         ui_mouse = None
-        printlog("Triggers-only mode: uinput devices not created")
+        logger.info("Triggers-only mode: uinput devices not created")
     else:
         kb_capabilities = {e.EV_KEY: set(USAGE_TO_EVKEY.values()) | set(MEDIA_USAGE_TO_EVKEY.values()) | set(SYSTEM_BITS_TO_EVKEY.values())}
         
@@ -1355,41 +1469,41 @@ async def main():
             
             all_remapped_keys = dest_keycodes | modifier_keycodes
             kb_capabilities[e.EV_KEY] |= all_remapped_keys
-            printlog(f"Added {len(dest_keycodes)} remapped destination key(s) and {len(modifier_keycodes)} modifier key(s) to keyboard capabilities")
+            logger.debug(f"Added {len(dest_keycodes)} remapped destination key(s) and {len(modifier_keycodes)} modifier key(s) to keyboard capabilities")
         
         mouse_capabilities = {e.EV_KEY: {e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE}, e.EV_REL: {e.REL_X, e.REL_Y, e.REL_WHEEL}}
         
         ui_kb = create_uinput_with_retry(kb_capabilities, "pCP BLE HID Keyboard")
         ui_mouse = create_uinput_with_retry(mouse_capabilities, "pCP BLE HID Mouse")
 
-        printlog(f"Virtual keyboard created: {ui_kb.device}")
-        printlog(f"Virtual mouse created: {ui_mouse.device}")
+        logger.info(f"Virtual keyboard created: {ui_kb.device}")
+        logger.info(f"Virtual mouse created: {ui_mouse.device}")
 
     # This is to avoid spamming log during periods of sleeping.
     TimeoutError = False
 
     while not stop_loop:
         if not TimeoutError:
-            printlog(f"Connecting to: {device_mac}...")
+            logger.info(f"Connecting to: {device_mac}...")
         try:
             await client.connect()
             TimeoutError = False
             # Read and parse report map (best-effort)
             try:
                 report_map = await client.read_gatt_char(UUID_HID_REPORT_MAP)
-                printlog(f"HID Report Map: {report_map.hex()}")
+                logger.debug(f"HID Report Map: {report_map.hex()}")
                 report_definitions = parse_hid_report_map(report_map)
                 if report_definitions:
                     for rid, definition in report_definitions.items():
                         rid_label = f"ID {rid}" if rid != 0 else "no ID"
-                        printlog(f"Report {rid_label}: type={definition['type']} size={definition['size_bytes']} bytes")
-                    printlog(f"Report IDs present: {report_ids_present}")
+                        logger.debug(f"Report {rid_label}: type={definition['type']} size={definition['size_bytes']} bytes")
+                    logger.debug(f"Report IDs present: {report_ids_present}")
                 else:
-                    printlog("Report map parsed but no report definitions found.")
+                    logger.debug("Report map parsed but no report definitions found.")
             except Exception as err:
                 report_definitions = {}
                 report_ids_present = False
-                printlog(f"Failed to read/parse Report Map: {err}")
+                logger.warning(f"Failed to read/parse Report Map: {err}")
 
             # Build comprehensive report info list that ties report IDs to handles
             report_info_list = []
@@ -1423,42 +1537,42 @@ async def main():
                                     "size_bytes": definition["size_bytes"]
                                 }
                                 report_info_list.append(report_info)
-                                printlog(f"   Report ID {report_id} ({type_str}, {definition['type']}) handle={char.handle}, size={definition['size_bytes']} bytes")
+                                logger.debug(f"   Report ID {report_id} ({type_str}, {definition['type']}) handle={char.handle}, size={definition['size_bytes']} bytes")
                             else:
                                 # No definition from report map, create basic info
-                                printlog(f"   Report ID {report_id} handle={char.handle} skipped due to incomplete data")
+                                logger.debug(f"   Report ID {report_id} handle={char.handle} skipped due to incomplete data")
                     except Exception as err:
-                        printlog(f"Failed to read Report Reference for handle {char.handle}: {err}")
+                        logger.warning(f"Failed to read Report Reference for handle {char.handle}: {err}")
 
             # Create notification handlers with report info
             for report_info in report_info_list:
                 task = asyncio.create_task(notification_handler(client, report_info, ui_kb, ui_mouse))
                 notification_tasks.append(task)
 
-            printlog("Waiting for input events. Press Ctrl+C to quit.")
+            logger.info("Waiting for input events. Press Ctrl+C to quit.")
             await stop_event.wait()
 
         except (asyncio.TimeoutError, asyncio.CancelledError) as err:
             if not TimeoutError:
-                printlog(f"Connect failed: {err}. Will retry...")
+                logger.error(f"Connect failed: {err}. Will retry...")
                 TimeoutError = True
         except BleakDBusError as err:
-            printlog(f"Bleak DBus error during connect: {err}. Will retry...")
+            logger.error(f"Bleak DBus error during connect: {err}. Will retry...")
         except Exception as err:
-            printlog(f"Unexpected error during connect: {err}. Will retry...")
+            logger.error(f"Unexpected error during connect: {err}. Will retry...")
 
         finally:
             await cleanup(client, notification_tasks)
             await asyncio.sleep(3)
             stop_event.clear()
 
-    printlog("Cleaning up...")
+    logger.info("Cleaning up...")
     if ui_kb is not None:
         ui_kb.close()
-        printlog("Virtual keyboard stopped.")
+        logger.info("Virtual keyboard stopped.")
     if ui_mouse is not None:
         ui_mouse.close()
-        printlog("Virtual mouse stopped.")
+        logger.info("Virtual mouse stopped.")
 
 
 if __name__ == "__main__":
