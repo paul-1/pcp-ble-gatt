@@ -233,7 +233,7 @@ def pair_now(bus):
     try:
         dev_iface.Pair(reply_handler=ok, error_handler=err, timeout=120)
     except dbus.DBusException as e:
-        logger.info(f'Pair() immediate failure: {e}')
+        logger.error(f'Pair() immediate failure: {e}')
         STATE['pair_attempted'] = False
         GLib.timeout_add(1500, lambda: (pair_now(bus), False)[1])
 
