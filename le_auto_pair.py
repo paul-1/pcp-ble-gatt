@@ -18,7 +18,6 @@ import argparse
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 import dbus
 import dbus.service
 import dbus.mainloop.glib
@@ -67,8 +66,7 @@ def setup_logging():
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = os.path.join(log_dir, f'pcp_hidbridge-{timestamp}.log')
+        log_file = os.path.join(log_dir, 'pcp_hidbridge.log')
         
         # Rotating file handler: max 5MB per file, keep 5 backup files
         file_handler = RotatingFileHandler(
