@@ -1472,13 +1472,15 @@ async def main():
 
     # This is to avoid spamming log during periods of sleeping.
     TimeoutError = False
+    NotFoundError = False
 
     while not stop_loop:
-        if not TimeoutError:
+        if not TimeoutError and not NotFoundError:
             logger.info(f"Connecting to: {device_mac}...")
         try:
             await client.connect()
             TimeoutError = False
+            NotFoundError = False
             # Read and parse report map (best-effort)
             try:
                 report_map = await client.read_gatt_char(UUID_HID_REPORT_MAP)
@@ -1548,7 +1550,11 @@ async def main():
                 logger.error(f"Connect failed: {err}. Will retry...")
                 TimeoutError = True
         except BleakDBusError as err:
-            logger.error(f"Bleak DBus error during connect: {err}. Will retry...")
+            logger.error(f"Bleak: {err}. Will retry...")
+        except BleakDeviceNotFoundError as err:
+            if not NotFoundError:
+                logger.error(f"Bleak: {err}. Will retry...")
+                NotFoundError = True
         except Exception as err:
             logger.error(f"Unexpected error during connect: {err}. Will retry...")
 
