@@ -1,0 +1,71 @@
+#!/bin/sh
+
+#========================================================================================
+# Bluetooth LE hid_ble_bridge.py   init.d script
+#----------------------------------------------------------------------------------------
+#
+
+usage() {
+    echo -e "\n$0 [start|stop|restart|status] [device-mac] [options]\n"
+    exit 1
+}
+
+
+if [ "$2" = "" ]; then
+    usage
+fi
+DEVICEMAC="$2"
+OPTIONS="$3"
+
+PNAME="hid_ble_bridge.py"
+DAEMON="/usr/local/bin/python3 -u /usr/local/bin/$PNAME"
+DAEMON_PID="/var/run/${PNAME}-${DEVICEMAC}.pid"
+
+start() {
+    echo "Starting pCP HID Bridge"
+    start-stop-daemon --start -v -m -p ${DAEMON_PID} -b --exec /bin/sh -- -c "exec ${DAEMON} --device-mac ${DEVICEMAC} ${OPTIONS} -vv"
+}
+
+stop() {
+    echo "Stoping pCP HID Bridge"
+    start-stop-daemon --stop -s QUIT --quiet -p ${DAEMON_PID}
+    CNT=0
+    PID=$(cat $DAEMON_PID 2>/dev/null)
+    if [ "$PID" != "" ]; then
+       echo -n "Waiting for hid bridge:$PID to exit..."
+        while [ $CNT -lt 20 ]; do
+            RET=$(ps | grep -v grep | grep $PID)
+            if [ "$RET" != "" ]; then
+                sleep 1
+                echo -n "."
+                CNT=$(( CNT + 1 ))
+            else
+                echo "Done"
+                break
+            fi
+        done
+    fi
+    rm ${DAEMON_PID}
+}
+
+status() {
+    # Check if our daemon is running.
+    if [ -f $DAEMON_PID ]; then
+        PID=$(cat $DAEMON_PID 2>/dev/null)
+        ps ax | grep -v grep | grep -q $PID
+        if [ $? -eq 0 ]; then
+            echo "pCP HID Bridge is running. PID=$PID"
+            exit 0
+        fi
+    fi
+    echo "pCP HID Bridge is not running."
+    exit 1
+}
+
+case $1 in
+    start) start;;
+    stop) stop;;
+    status) status;;
+    restart) stop; sleep 5; start;;
+    *) usage
+esac

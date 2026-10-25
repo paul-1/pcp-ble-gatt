@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 BLE HID Bridge with verified keyboard and mouse state handling.
-Run:  sudo -E python3 hid_ble_bridge.py --device-mac <MAC_ADDRESS>
- or:  sudo -E python3 hid_ble_bridge.py --device-name "HID Remote01"
+Optional key auto-repeat with --repeat (default: off, same behavior as before).
+Run:  sudo -E python3 hid_ble_bridge.py --device-mac <MAC_ADDRESS> [--repeat]
+ or:  sudo -E python3 hid_ble_bridge.py --device-name "HID Remote01" [--repeat]
 """
 
 import asyncio
@@ -115,6 +116,33 @@ report_ids_present = False  # set True if Report Map declares any Report IDs
 # Minimum hold duration in seconds before value 2 (hold/repeat) events are triggered
 MIN_HOLD_DURATION = 0.5  # 500ms - typical hold threshold
 
+# Auto-repeat (enabled by --repeat)
+repeat_enabled = False
+REPEAT_DELAY = 0.28      # seconds before the first repeat
+REPEAT_PERIOD = 0.04    # seconds between repeats (40 ms)
+repeat_tasks = {}       # keycode -> asyncio.Task
+
+async def _repeat_key(ui: UInput, keycode: int):
+    try:
+        await asyncio.sleep(REPEAT_DELAY)
+        while True:
+            ui.write(e.EV_KEY, keycode, 2)
+            ui.syn()
+            await asyncio.sleep(REPEAT_PERIOD)
+    except asyncio.CancelledError:
+        pass
+
+def start_repeat(ui: UInput, keycode: int):
+    if not repeat_enabled:
+        return
+    stop_repeat(keycode)
+    repeat_tasks[keycode] = asyncio.get_running_loop().create_task(_repeat_key(ui, keycode))
+
+def stop_repeat(keycode: int):
+    task = repeat_tasks.pop(keycode, None)
+    if task:
+        task.cancel()
+
 observed_mouse_lengths = {}  # source - set of seen mouse payload lengths
 MOUSE_MIN_MOVEMENT_THRESHOLD = 2  # ignore tiny/noise reports for length detection
 MIN_SAMPLES_FOR_CONFIDENCE = 3    # how many consistent lengths before locking in
@@ -125,7 +153,7 @@ logger = None
 def setup_logging(device_identifier: str = None, log_file: str = None, verbosity: int = 0):
     """
     Set up logging with rotating file handler.
-    
+
     Args:
         device_identifier: Device MAC address or None. If provided, included in default log filename.
                           If None, uses generic filename without MAC.
@@ -133,7 +161,7 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
         verbosity: 0 = ERROR (default), 1 = INFO (-v), 2 = DEBUG (-vv)
     """
     global logger
-    
+
     # Determine log level based on verbosity
     if verbosity >= 2:
         log_level = logging.DEBUG
@@ -141,7 +169,7 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
         log_level = logging.INFO
     else:
         log_level = logging.ERROR
-    
+
     # Determine log file path
     if log_file is None:
         if device_identifier:
@@ -155,15 +183,15 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
     else:
         # Custom log file provided - extract fallback name
         fallback_name = log_file.split('/')[-1] if '/' in log_file else log_file
-    
+
     # Create logger
     logger = logging.getLogger("hid_ble_bridge")
     logger.setLevel(log_level)
-    
+
     # Remove any existing handlers (in case this function is called multiple times)
     # This ensures clean state if logging needs to be reconfigured
     logger.handlers.clear()
-    
+
     # Create rotating file handler (100KB max, 1 backup)
     try:
         file_handler = RotatingFileHandler(
@@ -182,28 +210,28 @@ def setup_logging(device_identifier: str = None, log_file: str = None, verbosity
             backupCount=1
         )
         log_file = fallback_name
-    
+
     # Set format: mm/dd hh:mm:ss [Log Level]:[Line number] [log message]
     formatter = logging.Formatter(
         '%(asctime)s [%(levelname)s]:%(lineno)d %(message)s',
         datefmt='%m/%d %H:%M:%S'
     )
     file_handler.setFormatter(formatter)
-    
+
     # Add handler to logger
     logger.addHandler(file_handler)
-    
+
     # Log permission error if we had to fall back
     if 'error_msg' in locals():
         logger.warning(error_msg)
-    
+
     # Log initialization at INFO level always, so user knows logging is working
     # Temporarily set level to INFO to ensure this message is logged
     original_level = logger.level
     logger.setLevel(logging.INFO)
     logger.info(f"Logging initialized: file={log_file}, level={logging.getLevelName(original_level)}")
     logger.setLevel(original_level)  # Restore original level
-    
+
     return logger
 
 # ==============================================================================
@@ -225,19 +253,19 @@ def parse_triggers_file(filepath: str) -> list:
     """
     Parse triggerhappy-style configuration file.
     Format: <event name>	<event value>	<command line>
-    
+
     Returns list of tuples: (event_keys, event_value, command)
     where event_keys is a list of key names (first is main key, rest are modifiers)
-    
+
     Note: Caller should verify file exists before calling this function.
     Note: Logger must be initialized before calling this function.
     """
     if logger is None:
         print("ERROR: Logger not initialized before parsing triggers file")
         return []
-    
+
     parsed_triggers = []
-    
+
     try:
         with open(filepath, 'r') as f:
             for line_num, line in enumerate(f, 1):
@@ -245,61 +273,61 @@ def parse_triggers_file(filepath: str) -> list:
                 # Skip empty lines and comments
                 if not line or line.startswith('#'):
                     continue
-                
+
                 # Split on whitespace, limiting to 3 parts
                 parts = line.split(None, 2)
                 if len(parts) < 3:
                     logger.warning(f"Invalid trigger line {line_num}: {line}")
                     continue
-                
+
                 event_name, event_value_str, command = parts
-                
+
                 # Parse event value
                 try:
                     event_value = int(event_value_str)
                 except ValueError:
                     logger.warning(f"Invalid event value on line {line_num}: {event_value_str}")
                     continue
-                
+
                 # Parse event name (may include modifiers with +)
                 event_keys = event_name.split('+')
-                
+
                 parsed_triggers.append((event_keys, event_value, command))
                 # Log only first MAX_LOG_COMMAND_LENGTH chars to avoid exposing sensitive data
                 safe_command = command[:MAX_LOG_COMMAND_LENGTH] + "..." if len(command) > MAX_LOG_COMMAND_LENGTH else command
                 logger.debug(f"Loaded trigger: {event_keys} = {event_value} -> {safe_command}")
-    
+
     except Exception as e:
         logger.error(f"Error reading trigger file {filepath}: {e}")
-    
+
     return parsed_triggers
 
 def parse_remapping_file(filepath: str) -> dict:
     """
     Parse key remapping configuration file.
     Format: <source key name>:<destination spec>:<key_held>
-    
+
     Where:
-    - destination spec can be a simple key name (e.g., KEY_C) or 
+    - destination spec can be a simple key name (e.g., KEY_C) or
       modifiers+key (e.g., SHIFT+KEY_C or CTRL+ALT+KEY_C)
     - key_held is:
       - 0: Pass-through mode - send press/release as they occur
       - 1: Send momentary press+release on key release if held < 0.5s
       - 2: Send momentary press+release on key release if held >= 0.5s
-    
+
     Returns dict mapping (source_keycode, key_held) to (destination keycode, set of modifier keycodes).
-    
+
     Note: Caller should verify file exists before calling this function.
     Note: Logger must be initialized before calling this function.
     """
     if logger is None:
         print("ERROR: Logger not initialized before parsing remapping file")
         return {}
-    
+
     remappings = {}
     # Track which source keys have which key_held values defined
     source_key_definitions = {}
-    
+
     # Build a set of valid modifier names from MOD_BITS_TO_EVKEY
     valid_modifiers = set(MOD_BITS_TO_EVKEY.values())
     # Also include the string names for convenience
@@ -308,7 +336,7 @@ def parse_remapping_file(filepath: str) -> dict:
         key_name = KEYCODE_TO_NAME.get(keycode)
         if key_name:
             valid_modifier_names.add(key_name)
-    
+
     try:
         with open(filepath, 'r') as f:
             for line_num, line in enumerate(f, 1):
@@ -316,26 +344,26 @@ def parse_remapping_file(filepath: str) -> dict:
                 # Skip empty lines and comments
                 if not line or line.startswith('#'):
                     continue
-                
+
                 # Split on colon, expecting exactly 3 parts
                 parts = line.split(':')
                 if len(parts) != 3:
                     logger.warning(f"Invalid remapping line {line_num}: {line} (expected 3 colon-separated fields)")
                     continue
-                
+
                 source_key_name, dest_spec, key_held_str = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                
+
                 # Validate source key
                 source_keycode = NAME_TO_KEYCODE.get(source_key_name)
                 if source_keycode is None:
                     logger.warning(f"Unknown source key name '{source_key_name}' on line {line_num}")
                     continue
-                
+
                 # Parse destination spec - can be "KEY_C" or "SHIFT+KEY_C" or "CTRL+ALT+KEY_C"
                 dest_parts = dest_spec.split('+')
                 dest_modifiers = set()
                 dest_keycode = None
-                
+
                 if len(dest_parts) == 1:
                     # Simple key without modifiers
                     dest_keycode = NAME_TO_KEYCODE.get(dest_parts[0])
@@ -346,13 +374,13 @@ def parse_remapping_file(filepath: str) -> dict:
                     # Multiple parts - last is the key, rest are modifiers
                     final_key_name = dest_parts[-1]
                     modifier_names = dest_parts[:-1]
-                    
+
                     # Validate the final key
                     dest_keycode = NAME_TO_KEYCODE.get(final_key_name)
                     if dest_keycode is None:
                         logger.warning(f"Unknown destination key name '{final_key_name}' on line {line_num}")
                         continue
-                    
+
                     # Validate and collect modifiers
                     for mod_name_orig in modifier_names:
                         mod_name = mod_name_orig
@@ -363,33 +391,33 @@ def parse_remapping_file(filepath: str) -> dict:
                             if not mod_name.startswith('KEY_'):
                                 mod_name = f"KEY_{mod_name}"
                                 mod_keycode = NAME_TO_KEYCODE.get(mod_name)
-                        
+
                         # If still not found, try common abbreviations with LEFT prefix
                         if mod_keycode is None:
-                            common_mods = {'SHIFT': 'KEY_LEFTSHIFT', 'CTRL': 'KEY_LEFTCTRL', 
+                            common_mods = {'SHIFT': 'KEY_LEFTSHIFT', 'CTRL': 'KEY_LEFTCTRL',
                                          'ALT': 'KEY_LEFTALT', 'META': 'KEY_LEFTMETA',
                                          'CONTROL': 'KEY_LEFTCTRL'}
                             if mod_name_orig.upper() in common_mods:
                                 mod_name = common_mods[mod_name_orig.upper()]
                                 mod_keycode = NAME_TO_KEYCODE.get(mod_name)
-                        
+
                         if mod_keycode is None:
                             logger.warning(f"Unknown modifier key name '{mod_name_orig}' on line {line_num}")
                             dest_keycode = None  # Invalidate this entry
                             break
-                        
+
                         # Check if this is actually a valid modifier key
                         if mod_keycode not in valid_modifiers:
                             logger.warning(f"'{mod_name_orig}' is not a valid modifier key on line {line_num}")
                             dest_keycode = None  # Invalidate this entry
                             break
-                        
+
                         dest_modifiers.add(mod_keycode)
-                    
+
                     # Skip this entry if validation failed
                     if dest_keycode is None:
                         continue
-                
+
                 # Validate key_held value
                 try:
                     key_held = int(key_held_str)
@@ -399,16 +427,16 @@ def parse_remapping_file(filepath: str) -> dict:
                 except ValueError:
                     logger.warning(f"Invalid key_held value '{key_held_str}' on line {line_num} (must be integer 0, 1, or 2)")
                     continue
-                
+
                 # Track definitions for validation
                 if source_keycode not in source_key_definitions:
                     source_key_definitions[source_keycode] = set()
                 source_key_definitions[source_keycode].add(key_held)
-                
+
                 # Store the mapping with tuple (dest_keycode, modifier_set)
                 # Use tuple of (source_keycode, key_held) as key to allow multiple definitions per source key
                 remappings[(source_keycode, key_held)] = (dest_keycode, dest_modifiers)
-                
+
                 # Build readable log message
                 dest_key_name = KEYCODE_TO_NAME.get(dest_keycode, f'key_{dest_keycode}')
                 if dest_modifiers:
@@ -417,10 +445,10 @@ def parse_remapping_file(filepath: str) -> dict:
                 else:
                     dest_spec_str = dest_key_name
                 logger.debug(f"Loaded remapping: {source_key_name} -> {dest_spec_str} (key_held={key_held})")
-    
+
     except Exception as e:
         logger.error(f"Error reading remapping file {filepath}: {e}")
-    
+
     # Validate that if key_held 0 is defined, no 1 or 2 can be defined
     # Filter out invalid combinations
     valid_remappings = {}
@@ -437,44 +465,44 @@ def parse_remapping_file(filepath: str) -> dict:
             for kh in key_held_values:
                 if (source_keycode, kh) in remappings:
                     valid_remappings[(source_keycode, kh)] = remappings[(source_keycode, kh)]
-    
+
     return valid_remappings
 
 def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
     """
     Check if a key event matches any configured trigger.
-    
+
     Args:
         keycode: The evdev keycode that was pressed/released
         value: Event value (0=release, 1=press, 2=hold/repeat)
         active_modifiers: Set of currently active modifier keycodes
-    
+
     Returns:
         Command string to execute, or None if no match
     """
     global triggers
-    
+
     # Get the key name for the keycode
     key_name = KEYCODE_TO_NAME.get(keycode)
     if not key_name:
         return None
-    
+
     # Find all matching triggers and select the most specific one
     matches = []
-    
+
     for trigger_keys, trigger_value, command in triggers:
         # Check if event value matches
         if trigger_value != value:
             continue
-        
+
         # First key in trigger_keys is the main key
         main_key = trigger_keys[0]
         modifier_keys = set(trigger_keys[1:])
-        
+
         # Check if main key matches
         if main_key != key_name:
             continue
-        
+
         # Check if all required modifiers are active (use NAME_TO_KEYCODE for efficiency)
         required_modifier_codes = set()
         for mod_name in modifier_keys:
@@ -484,17 +512,17 @@ def match_trigger(keycode: int, value: int, active_modifiers: set) -> str:
             else:
                 # Log warning for unknown modifier names
                 logger.warning(f"Unknown modifier key name '{mod_name}' in trigger configuration")
-        
+
         # Check if required modifiers are a subset of active modifiers
         # This allows additional modifiers to be pressed (standard triggerhappy behavior)
         if required_modifier_codes.issubset(active_modifiers):
             matches.append((len(required_modifier_codes), command))
-    
+
     # Return the most specific match (most modifiers)
     if matches:
         matches.sort(reverse=True)  # Sort by number of modifiers, descending
         return matches[0][1]
-    
+
     return None
 
 async def execute_trigger_command(command: str):
@@ -522,24 +550,24 @@ async def execute_trigger_command(command: str):
 async def handle_key_release_triggers(keycode: int, press_times: dict, active_modifiers: set, actions: list):
     """
     Handle trigger execution on key release based on hold duration.
-    
+
     Args:
         keycode: The key that was released
         press_times: Dictionary tracking press times (either key_press_times or media_press_times)
         active_modifiers: Set of currently active modifier keycodes
         actions: List to append action descriptions to
-    
+
     Returns:
         List of commands to execute (returned to allow logging after main HID report log)
     """
     commands_to_execute = []
-    
+
     if keycode in press_times:
         press_time = press_times[keycode]
         current_time = time.time()
         hold_duration = current_time - press_time
         del press_times[keycode]
-        
+
         # Check which trigger to execute based on hold duration
         if hold_duration >= MIN_HOLD_DURATION:
             # Key was held >= 0.5s, execute value 2 trigger
@@ -551,11 +579,11 @@ async def handle_key_release_triggers(keycode: int, press_times: dict, active_mo
             actions.append(f"{key_name(keycode)} held for {hold_duration:.2f}s (value 1)")
             if command := match_trigger(keycode, 1, active_modifiers):
                 commands_to_execute.append(command)
-        
+
         # Also check for release trigger (value 0)
         if command := match_trigger(keycode, 0, active_modifiers):
             commands_to_execute.append(command)
-    
+
     return commands_to_execute
 
 # ==============================================================================
@@ -565,23 +593,23 @@ async def handle_key_release_triggers(keycode: int, press_times: dict, active_mo
 def create_uinput_with_retry(capabilities, name, max_retries=5, initial_delay=0.5, max_delay=5.0):
     """
     Create a UInput device with retry logic to handle transient device errors.
-    
+
     Args:
         capabilities: Device capabilities dict
         name: Device name string
         max_retries: Maximum number of retry attempts (default: 5)
         initial_delay: Initial delay between retries in seconds (default: 0.5)
         max_delay: Maximum delay between retries in seconds (default: 5.0)
-    
+
     Returns:
         UInput device instance
-    
+
     Raises:
         OSError: If all retry attempts fail
     """
     delay = initial_delay
     last_error = None
-    
+
     for attempt in range(max_retries):
         try:
             ui = UInput(capabilities, name=name)
@@ -596,7 +624,7 @@ def create_uinput_with_retry(capabilities, name, max_retries=5, initial_delay=0.
                 delay = min(delay * 2, max_delay)  # Exponential backoff with cap
             else:
                 logger.error(f"Failed to create {name} after {max_retries} attempts")
-    
+
     # If we get here, all retries failed
     raise last_error
 
@@ -723,7 +751,7 @@ async def prepare_device_for_connection(mac_address: str) -> bool:
 def parse_hid_report_map(report_map: bytes) -> dict:
     """
     Parse HID Report Map (USB/BLE HID Report Descriptor) and build report definitions.
-    
+
     Returns dict:
         report_id -> {
             "type": str,                # e.g. "mouse", "keyboard", "consumer", "system", etc.
@@ -902,7 +930,7 @@ def resolve_report_definition(data: bytes):
         return rid, definition, data, False, "length"
 
     return None
-    
+
 # ==============================================================================
 # HID handling functions with enhanced logging
 # ==============================================================================
@@ -911,7 +939,7 @@ def send_momentary_key(ui: UInput, keycode: int, modifiers: set = None):
     """
     Send a momentary key press followed immediately by a release.
     Used for hold-time-based remapping with KEY_HELD=1 or 2.
-    
+
     Args:
         ui: UInput device
         keycode: The key to press
@@ -920,27 +948,28 @@ def send_momentary_key(ui: UInput, keycode: int, modifiers: set = None):
     if ui is not None:
         if modifiers is None:
             modifiers = set()
-        
+
         # Press all modifiers first
         for mod_keycode in sorted(modifiers):
             ui.write(e.EV_KEY, mod_keycode, 1)
             ui.syn()
-        
+
         # Press the main key
         ui.write(e.EV_KEY, keycode, 1)
         ui.syn()
-        
+
         # Release the main key
         ui.write(e.EV_KEY, keycode, 0)
         ui.syn()
-        
+
         # Release all modifiers
         for mod_keycode in sorted(modifiers):
             ui.write(e.EV_KEY, mod_keycode, 0)
             ui.syn()
 
 
-def press(ui: UInput, keycode: int):
+def press(ui: UInput, keycode: int, repeat: bool = True):
+    """Press a key. repeat=False for modifiers (a keyboard never repeats them)."""
     if ui is not None:
         # Check if this key has remapping with key_held=0 (pass-through mode)
         if (keycode, 0) in key_remappings:
@@ -954,6 +983,8 @@ def press(ui: UInput, keycode: int):
             ui.syn()
             # Track which modifiers are active for this remapped key
             remapped_active_modifiers[keycode] = modifiers
+            if repeat:
+                start_repeat(ui, remapped_keycode)
         # Check if key has hold-time-based remapping (key_held=1 or 2)
         elif (keycode, 1) in key_remappings or (keycode, 2) in key_remappings:
             # Track press time but don't inject yet - wait for release
@@ -962,6 +993,8 @@ def press(ui: UInput, keycode: int):
             # No remapping, send as-is
             ui.write(e.EV_KEY, keycode, 1)
             ui.syn()
+            if repeat:
+                start_repeat(ui, keycode)
 
 
 def release(ui: UInput, keycode: int):
@@ -969,6 +1002,7 @@ def release(ui: UInput, keycode: int):
         # Check if this key has remapping with key_held=0 (pass-through mode)
         if (keycode, 0) in key_remappings:
             remapped_keycode, modifiers = key_remappings[(keycode, 0)]
+            stop_repeat(remapped_keycode)
             # Release the remapped key
             ui.write(e.EV_KEY, remapped_keycode, 0)
             ui.syn()
@@ -984,7 +1018,7 @@ def release(ui: UInput, keycode: int):
             current_time = time.time()
             hold_duration = current_time - press_time
             del remapped_key_press_times[keycode]
-            
+
             # Determine which key_held value to use based on hold duration
             if hold_duration >= MIN_HOLD_DURATION:
                 # Held >= 0.5s, use key_held=2
@@ -998,6 +1032,7 @@ def release(ui: UInput, keycode: int):
                     send_momentary_key(ui, remapped_keycode, modifiers)
         else:
             # No remapping, send as-is
+            stop_repeat(keycode)
             ui.write(e.EV_KEY, keycode, 0)
             ui.syn()
 
@@ -1020,11 +1055,11 @@ def inject_mouse_event(ui: UInput, buttons, x, y, scroll):
 def key_name(keycode: int) -> str:
     return KEYCODE_TO_NAME.get(keycode, f"KEY_{keycode}")
 
-async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes, 
+async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: str, data: bytes,
                                         explicit_report_type: str = None, explicit_size_bytes: int = None):
     """
     Decode HID report data and inject input events.
-    
+
     Args:
         ui_kb: keyboard uinput device
         ui_mouse: mouse uinput device
@@ -1032,7 +1067,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
         data: raw HID report data
         explicit_report_type: explicit report type from report map (e.g., "keyboard", "mouse", "consumer")
         explicit_size_bytes: expected size in bytes from report map (reserved for future validation/verification)
-    
+
     Note: explicit_size_bytes is currently reserved for future use. It could be used to validate
     incoming data length or warn about mismatches, but for now we rely on the report type alone.
     """
@@ -1201,7 +1236,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
                     if modifiers_byte & (1 << bit):
                         current_modifiers.add(keycode)
                         if keycode not in key_states:
-                            press(ui_kb, keycode)
+                            press(ui_kb, keycode, repeat=False)
                             key_states.add(keycode)
                             actions.append(f"{key_name(keycode)} Pressed")
                     elif keycode in key_states:
@@ -1278,7 +1313,7 @@ async def decode_hid_report_and_inject(ui_kb: UInput, ui_mouse: UInput, source: 
 async def notification_handler(client: BleakClient, report_info: dict, ui_kb: UInput, ui_mouse: UInput):
     """
     Handle notifications for a specific HID report.
-    
+
     Args:
         client: BLE client
         report_info: Dictionary containing:
@@ -1292,7 +1327,7 @@ async def notification_handler(client: BleakClient, report_info: dict, ui_kb: UI
     handle = report_info["handle"]
     report_type = report_info.get("report_type")
     size_bytes = report_info.get("size_bytes")
-    
+
     try:
         await client.start_notify(
             handle,
@@ -1328,11 +1363,15 @@ async def cleanup(client, tasks):
             logger.debug("Disconnect interrupted (EOFError) during shutdown; ignoring.")
         except Exception as e:
             logger.error(f"Error during disconnect: {e}")
-    
+
     # Clear task list to prevent memory leaks on reconnection
     global notification_tasks, key_states, media_pressed_by_source, system_pressed_by_source, current_modifiers, key_press_times, media_press_times, system_press_times
     notification_tasks.clear()
-    
+
+    # Stop all running auto-repeats so nothing keeps repeating after a disconnect
+    for kc in list(repeat_tasks):
+        stop_repeat(kc)
+
     # Reset key states to prevent stuck keys after disconnect
     key_states.clear()
     media_pressed_by_source.clear()
@@ -1354,6 +1393,8 @@ async def main():
     group.add_argument("--device-name", help="Bluetooth device name (e.g., 'HID Remote01').")
     parser.add_argument("--scan-timeout", type=float, default=10.0, help="Timeout in seconds for scanning by name (default: 10).")
     
+
+
     # Verbosity arguments (mutually exclusive with --debug for backwards compatibility)
     verbosity_group = parser.add_mutually_exclusive_group()
     verbosity_group.add_argument("-v", action="count", default=0, dest="verbosity", 
@@ -1364,13 +1405,16 @@ async def main():
     parser.add_argument("--logfile", type=str, default=None,
                        help="Path to log file (default: /var/log/pcp_hidbridge-<device-mac>.log)")
     
+    parser.add_argument("--repeat", action="store_true",
+                        help="Generate key auto-repeat for held keys.")
+    
     # Create mutually exclusive group for triggers and remapkeys
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--triggers", type=str, help="Path to triggerhappy-style configuration file for executing commands on key events.")
     mode_group.add_argument("--remapkeys", type=str, help="Path to key remapping configuration file. Format: SOURCE_KEY:DEST_KEY:KEY_HELD (one mapping per line).")
     args = parser.parse_args()
 
-    global stop_loop, triggers, key_remappings, report_definitions, report_ids_present
+    global stop_loop, triggers, key_remappings, report_definitions, report_ids_present, repeat_enabled
 
     # Initialize logging right after parsing args
     # If device_mac is provided, use it in the filename; otherwise use generic filename
@@ -1411,6 +1455,21 @@ async def main():
         else:
             logger.warning(f"Remapping file not found: {args.remapkeys}")
             logger.warning("Continuing without key remapping...")
+
+    # Enable key auto-repeat if specified (handled like --triggers / --remapkeys,
+    # so that the state is always visible in the log file, whether invoked
+    # from a shell or from a wrapper program/service)
+    repeat_enabled = False
+    if args.repeat:
+        repeat_enabled = True
+        if args.triggers:
+            logger.warning("--repeat has no effect in triggers-only mode "
+                           "(uinput devices are not created)")
+        else:
+            logger.info(f"Key auto-repeat enabled "
+                        f"(delay={REPEAT_DELAY}s, period={REPEAT_PERIOD}s)")
+    else:
+        logger.info("Key auto-repeat disabled")
 
     # Prepare the device (disconnect if connected, check bonding, untrust)
     ready = await prepare_device_for_connection(device_mac)
